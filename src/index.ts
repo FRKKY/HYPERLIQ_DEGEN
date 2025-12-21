@@ -46,7 +46,7 @@ class TradingSystem {
     await this.db.connect();
 
     // Initialize Hyperliquid clients
-    this.auth = new HyperliquidAuth(config.hyperliquid.privateKey);
+    this.auth = new HyperliquidAuth(config.hyperliquid.privateKey, config.hyperliquid.useTestnet);
     console.log(`[System] Wallet address (derived from private key): ${this.auth.address}`);
     console.log(`[System] Configured wallet address: ${config.hyperliquid.walletAddress}`);
     if (this.auth.address.toLowerCase() !== config.hyperliquid.walletAddress.toLowerCase()) {
