@@ -282,22 +282,34 @@ export class HyperliquidRestClient {
     size: number,
     reduceOnly: boolean = false
   ): Promise<OrderResponse> {
+    logger.debug('Hyperliquid', 'placeMarketOrder called', { coin, isBuy, size, reduceOnly });
+
     const mids = await this.getAllMids();
     const midPrice = parseFloat(mids[coin]);
+
+    if (!midPrice || isNaN(midPrice)) {
+      logger.error('Hyperliquid', 'Invalid mid price', { coin, midPrice, mids: mids[coin] });
+      throw new Error(`Invalid mid price for ${coin}: ${mids[coin]}`);
+    }
+
     // For market orders, use a price that will fill immediately
     const slippage = 0.01; // 1%
     const price = isBuy ? midPrice * (1 + slippage) : midPrice * (1 - slippage);
+
+    const assetIndex = this.coinToAssetIndex(coin);
 
     logger.trade('Place market order', {
       coin,
       side: isBuy ? 'BUY' : 'SELL',
       size,
       midPrice,
+      price,
+      assetIndex,
       slippage: `${slippage * 100}%`,
     });
 
     return this.placeOrder({
-      asset: this.coinToAssetIndex(coin),
+      asset: assetIndex,
       isBuy,
       price,
       size,
