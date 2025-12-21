@@ -47,6 +47,11 @@ class TradingSystem {
 
     // Initialize Hyperliquid clients
     this.auth = new HyperliquidAuth(config.hyperliquid.privateKey);
+    console.log(`[System] Wallet address (derived from private key): ${this.auth.address}`);
+    console.log(`[System] Configured wallet address: ${config.hyperliquid.walletAddress}`);
+    if (this.auth.address.toLowerCase() !== config.hyperliquid.walletAddress.toLowerCase()) {
+      console.warn('[System] WARNING: Derived address does not match configured HL_WALLET_ADDRESS!');
+    }
     this.restClient = new HyperliquidRestClient(this.auth, config.hyperliquid.useTestnet);
     await this.restClient.initialize();
     this.wsClient = new HyperliquidWebSocket(config.hyperliquid.useTestnet);
@@ -109,7 +114,9 @@ class TradingSystem {
   private async initializeSystemState(configInitialCapital: number): Promise<void> {
     try {
       // Get actual account equity from Hyperliquid
+      console.log('[System] Fetching account state from Hyperliquid...');
       const accountState = await this.restClient.getAccountState();
+      console.log('[System] Account state received:', JSON.stringify(accountState.marginSummary));
       const equity = parseFloat(accountState.marginSummary.accountValue);
 
       if (isNaN(equity) || equity <= 0) {
