@@ -139,17 +139,20 @@ export class HyperliquidAuth {
     const view = new DataView(nonceBytes.buffer);
     view.setBigUint64(0, BigInt(nonce), false); // false = big-endian
 
-    // Concatenate msgpack action + nonce + optional vault address
-    // Order matches Python SDK: action || nonce || vault
-    let data: Uint8Array;
+    // Vault address: 20 bytes if provided, zeros otherwise
+    // Per Chainstack example: msgpack || vault (20 bytes) || nonce
+    let vaultBytes: Uint8Array;
     if (vaultAddress) {
       // IMPORTANT: Vault address must be lowercase per Hyperliquid docs
       const normalizedVault = vaultAddress.toLowerCase();
-      const vaultBytes = ethers.utils.arrayify(normalizedVault);
-      data = new Uint8Array([...msgPackAction, ...nonceBytes, ...vaultBytes]);
+      vaultBytes = ethers.utils.arrayify(normalizedVault);
     } else {
-      data = new Uint8Array([...msgPackAction, ...nonceBytes]);
+      // Zero-filled 20 bytes when no vault
+      vaultBytes = new Uint8Array(20);
     }
+
+    // Concatenate: msgpack action + vault address (20 bytes) + nonce (8 bytes)
+    const data = new Uint8Array([...msgPackAction, ...vaultBytes, ...nonceBytes]);
 
     // Return keccak256 hash as bytes32
     return ethers.utils.keccak256(data);
