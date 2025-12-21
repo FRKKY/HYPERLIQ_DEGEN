@@ -235,8 +235,20 @@ class TradingSystem {
       }
 
       // Get account state for equity
-      const accountState = await this.restClient.getAccountState();
-      const equity = parseFloat(accountState.marginSummary.accountValue);
+      let equity: number;
+      try {
+        const accountState = await this.restClient.getAccountState();
+        equity = parseFloat(accountState.marginSummary.accountValue);
+      } catch (error) {
+        console.log('[System] Skipping trading cycle - could not get account state');
+        return;
+      }
+
+      // Validate equity before proceeding
+      if (isNaN(equity) || equity <= 0) {
+        console.log('[System] Skipping trading cycle - invalid equity:', equity);
+        return;
+      }
 
       // Run continuous risk checks
       const riskCheck = await this.riskManager.runContinuousChecks(equity);

@@ -22,10 +22,29 @@ export class RiskManager {
   async checkPreTrade(signal: Signal, allocation: number, equity: number): Promise<RiskCheckResult> {
     const checks: string[] = [];
 
+    // Guard against invalid equity values
+    if (isNaN(equity) || equity <= 0) {
+      return { approved: false, reason: 'Invalid equity value', maxLeverage: 0 };
+    }
+
     // 1. Check if trading is enabled
     const systemState = await this.db.getSystemState();
     if (!systemState.tradingEnabled) {
       return { approved: false, reason: 'Trading is paused', maxLeverage: 0 };
+    }
+
+    // Guard against uninitialized system state
+    if (!systemState.peakEquity || systemState.peakEquity <= 0 ||
+        !systemState.dailyStartEquity || systemState.dailyStartEquity <= 0) {
+      // Initialize with current equity if not set
+      if (!systemState.peakEquity || systemState.peakEquity <= 0) {
+        await this.db.updateSystemState('peak_equity', equity);
+        systemState.peakEquity = equity;
+      }
+      if (!systemState.dailyStartEquity || systemState.dailyStartEquity <= 0) {
+        await this.db.updateSystemState('daily_start_equity', equity);
+        systemState.dailyStartEquity = equity;
+      }
     }
 
     // 2. Check drawdown
