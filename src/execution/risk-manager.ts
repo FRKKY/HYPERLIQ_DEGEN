@@ -84,10 +84,28 @@ export class RiskManager {
     alerts: Alert[];
     riskLevel: 'NORMAL' | 'REDUCED' | 'MINIMUM';
   }> {
+    // Guard against invalid equity values
+    if (isNaN(equity) || equity <= 0) {
+      console.log('[RiskManager] Skipping risk check - invalid equity value:', equity);
+      return { shouldPause: false, alerts: [], riskLevel: 'NORMAL' };
+    }
+
     const systemState = await this.db.getSystemState();
     const alerts: Alert[] = [];
     let riskLevel: 'NORMAL' | 'REDUCED' | 'MINIMUM' = 'NORMAL';
     let shouldPause = false;
+
+    // Guard against uninitialized system state
+    if (!systemState.peakEquity || systemState.peakEquity <= 0) {
+      console.log('[RiskManager] Initializing peak equity to:', equity);
+      await this.db.updateSystemState('peak_equity', equity);
+      systemState.peakEquity = equity;
+    }
+    if (!systemState.dailyStartEquity || systemState.dailyStartEquity <= 0) {
+      console.log('[RiskManager] Initializing daily start equity to:', equity);
+      await this.db.updateSystemState('daily_start_equity', equity);
+      systemState.dailyStartEquity = equity;
+    }
 
     // Update peak equity
     if (equity > systemState.peakEquity) {

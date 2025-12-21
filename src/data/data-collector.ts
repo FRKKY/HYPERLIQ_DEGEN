@@ -100,24 +100,27 @@ export class DataCollector extends EventEmitter {
   }
 
   private startCandleFetching(): void {
-    const timeframes: { tf: Timeframe; intervalMs: number }[] = [
-      { tf: '1m', intervalMs: 60 * 1000 },
-      { tf: '5m', intervalMs: 5 * 60 * 1000 },
-      { tf: '15m', intervalMs: 15 * 60 * 1000 },
-      { tf: '1h', intervalMs: 60 * 60 * 1000 },
-      { tf: '4h', intervalMs: 4 * 60 * 60 * 1000 },
+    const timeframes: { tf: Timeframe; intervalMs: number; delayStart: number }[] = [
+      { tf: '1h', intervalMs: 60 * 60 * 1000, delayStart: 0 },        // Start immediately, most important
+      { tf: '15m', intervalMs: 15 * 60 * 1000, delayStart: 60000 },   // Start after 1 min
+      { tf: '5m', intervalMs: 5 * 60 * 1000, delayStart: 120000 },    // Start after 2 min
+      { tf: '4h', intervalMs: 4 * 60 * 60 * 1000, delayStart: 180000 }, // Start after 3 min
+      { tf: '1m', intervalMs: 60 * 1000, delayStart: 240000 },        // Start after 4 min
     ];
 
-    for (const { tf, intervalMs } of timeframes) {
-      // Fetch initial candles
-      this.fetchAllCandles(tf).catch(console.error);
-
-      // Set up periodic fetching
-      const interval = setInterval(() => {
+    for (const { tf, intervalMs, delayStart } of timeframes) {
+      // Stagger initial candle fetches to avoid rate limits
+      setTimeout(() => {
+        console.log(`[DataCollector] Starting ${tf} candle collection...`);
         this.fetchAllCandles(tf).catch(console.error);
-      }, intervalMs);
 
-      this.candleIntervals.set(tf, interval);
+        // Set up periodic fetching
+        const interval = setInterval(() => {
+          this.fetchAllCandles(tf).catch(console.error);
+        }, intervalMs);
+
+        this.candleIntervals.set(tf, interval);
+      }, delayStart);
     }
   }
 
@@ -142,10 +145,12 @@ export class DataCollector extends EventEmitter {
 
         await this.db.insertCandles(formattedCandles);
 
-        // Rate limiting
-        await this.sleep(50);
+        // Rate limiting - 200ms between requests
+        await this.sleep(200);
       } catch (error) {
-        console.error(`[DataCollector] Failed to fetch ${timeframe} candles for ${symbol}:`, error);
+        // Silently skip failed requests - they'll retry on next cycle
+        // Rate limit even on failure to avoid hammering API
+        await this.sleep(500);
       }
     }
   }
@@ -169,16 +174,20 @@ export class DataCollector extends EventEmitter {
 
           await this.db.insertFundingRates(rates);
 
-          // Rate limiting
-          await this.sleep(50);
+          // Rate limiting - 200ms between requests
+          await this.sleep(200);
         } catch (error) {
-          console.error(`[DataCollector] Failed to fetch funding for ${symbol}:`, error);
+          // Silently skip failed requests - they'll retry on next cycle
+          await this.sleep(500);
         }
       }
     };
 
-    // Fetch initial funding rates
-    fetchFunding().catch(console.error);
+    // Delay initial funding fetch to let candles start first
+    setTimeout(() => {
+      console.log('[DataCollector] Starting funding rate collection...');
+      fetchFunding().catch(console.error);
+    }, 30000); // Start after 30 seconds
 
     // Fetch every hour
     const interval = setInterval(() => {

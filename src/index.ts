@@ -51,6 +51,9 @@ class TradingSystem {
     await this.restClient.initialize();
     this.wsClient = new HyperliquidWebSocket(config.hyperliquid.useTestnet);
 
+    // Initialize system state with actual account equity
+    await this.initializeSystemState(config.trading.initialCapital);
+
     // Initialize data collector
     this.dataCollector = new DataCollector(this.restClient, this.wsClient, this.db);
 
@@ -101,6 +104,33 @@ class TradingSystem {
     this.dashboardServer.setSystemController(this.createSystemController());
 
     console.log('[System] Initialization complete');
+  }
+
+  private async initializeSystemState(configInitialCapital: number): Promise<void> {
+    try {
+      // Get actual account equity from Hyperliquid
+      const accountState = await this.restClient.getAccountState();
+      const equity = parseFloat(accountState.marginSummary.accountValue);
+
+      if (isNaN(equity) || equity <= 0) {
+        console.log(`[System] Warning: Could not get valid equity, using config value: $${configInitialCapital}`);
+        await this.db.updateSystemState('peak_equity', configInitialCapital);
+        await this.db.updateSystemState('daily_start_equity', configInitialCapital);
+      } else {
+        console.log(`[System] Account equity: $${equity.toFixed(2)}`);
+        await this.db.updateSystemState('peak_equity', equity);
+        await this.db.updateSystemState('daily_start_equity', equity);
+      }
+
+      // Re-enable trading (in case it was paused from previous bad state)
+      await this.db.updateSystemState('trading_enabled', true);
+      await this.db.updateSystemState('system_status', 'RUNNING');
+      await this.db.updateSystemState('pause_reason', null);
+    } catch (error) {
+      console.log(`[System] Warning: Could not initialize equity, using config value: $${configInitialCapital}`);
+      await this.db.updateSystemState('peak_equity', configInitialCapital);
+      await this.db.updateSystemState('daily_start_equity', configInitialCapital);
+    }
   }
 
   private createSystemController() {
