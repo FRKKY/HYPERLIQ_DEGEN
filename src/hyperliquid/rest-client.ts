@@ -10,6 +10,8 @@ import {
   OrderRequest,
   OrderResponse,
   CancelResponse,
+  AssetContext,
+  MetaAndAssetCtxsResponse,
 } from './types';
 import {
   logger,
@@ -159,6 +161,25 @@ export class HyperliquidRestClient {
     return this.requestWithRetry('meta', { type: 'meta' });
   }
 
+  /**
+   * Get metadata and asset contexts including open interest, mark price, funding, etc.
+   */
+  async getMetaAndAssetCtxs(): Promise<MetaAndAssetCtxsResponse> {
+    const [meta, assetCtxs] = await this.requestWithRetry<[HyperliquidMeta, AssetContext[]]>(
+      'metaAndAssetCtxs',
+      { type: 'metaAndAssetCtxs' }
+    );
+    return { meta, assetCtxs };
+  }
+
+  /**
+   * Get asset contexts (open interest, funding, mark price, etc.) for all assets
+   */
+  async getAssetContexts(): Promise<AssetContext[]> {
+    const response = await this.getMetaAndAssetCtxs();
+    return response.assetCtxs;
+  }
+
   async getAllMids(): Promise<Record<string, string>> {
     return this.requestWithRetry('allMids', { type: 'allMids' });
   }
@@ -184,6 +205,37 @@ export class HyperliquidRestClient {
     const userAddress = (address || this.auth.address).toLowerCase();
     return this.requestWithRetry('userFills', {
       type: 'userFills',
+      user: userAddress,
+    });
+  }
+
+  /**
+   * Get user fills with time-based pagination (up to 10000 most recent)
+   * Returns at most 2000 fills per response
+   */
+  async getUserFillsByTime(
+    startTime: number,
+    endTime?: number,
+    aggregateByTime?: boolean,
+    address?: string
+  ): Promise<HyperliquidFill[]> {
+    const userAddress = (address || this.auth.address).toLowerCase();
+    return this.requestWithRetry('userFillsByTime', {
+      type: 'userFillsByTime',
+      user: userAddress,
+      startTime,
+      endTime: endTime || Date.now(),
+      aggregateByTime: aggregateByTime || false,
+    });
+  }
+
+  /**
+   * Get historical orders (up to 2000 most recent)
+   */
+  async getHistoricalOrders(address?: string): Promise<HyperliquidOpenOrder[]> {
+    const userAddress = (address || this.auth.address).toLowerCase();
+    return this.requestWithRetry('historicalOrders', {
+      type: 'historicalOrders',
       user: userAddress,
     });
   }
@@ -299,8 +351,9 @@ export class HyperliquidRestClient {
     }
 
     // For market orders, use a price that will fill immediately
+    // Using slippagePrice to match SDK's 5 significant figure rounding
     const slippage = 0.01; // 1%
-    const price = isBuy ? midPrice * (1 + slippage) : midPrice * (1 - slippage);
+    const price = this.slippagePrice(isBuy, slippage, midPrice);
 
     const assetIndex = this.coinToAssetIndex(coin);
     const szDecimals = this.getSzDecimals(coin);
@@ -333,6 +386,25 @@ export class HyperliquidRestClient {
   private roundToDecimals(value: number, decimals: number): number {
     const factor = Math.pow(10, decimals);
     return Math.floor(value * factor) / factor;  // Floor to avoid over-buying
+  }
+
+  /**
+   * Calculate slippage price matching Python SDK's slippage_price()
+   * Applies slippage and rounds to 5 significant figures
+   */
+  private slippagePrice(isBuy: boolean, slippage: number, px: number): number {
+    const adjustedPx = isBuy ? px * (1 + slippage) : px * (1 - slippage);
+    return this.roundToSigFigs(adjustedPx, 5);
+  }
+
+  /**
+   * Round to N significant figures matching Python SDK's round_float()
+   */
+  private roundToSigFigs(x: number, sigFigs: number): number {
+    if (x === 0) return 0;
+    const magnitude = Math.floor(Math.log10(Math.abs(x)));
+    const scale = Math.pow(10, sigFigs - magnitude - 1);
+    return Math.round(x * scale) / scale;
   }
 
   async cancelOrder(coin: string, oid: number): Promise<CancelResponse> {
@@ -476,22 +548,20 @@ export class HyperliquidRestClient {
   }
 
   /**
-   * Format price to wire format matching SDK's approach
-   * Uses 5 significant figures and removes trailing zeros
+   * Format price to wire format matching Python SDK's float_to_wire exactly
+   * Simply formats to 8 decimal places and normalizes (removes trailing zeros)
    */
   private formatPrice(price: number): string {
-    if (price === 0) return '0';
+    // Handle zero and negative zero (SDK: if rounded == "-0": rounded = "0")
+    if (price === 0 || Object.is(price, -0)) return '0';
 
-    // Round to 5 significant figures (matching SDK slippage_price)
-    const magnitude = Math.floor(Math.log10(Math.abs(price)));
-    const scale = Math.pow(10, 4 - magnitude); // 5 sig figs = 4 - magnitude
-    const rounded = Math.round(price * scale) / scale;
+    // Format to 8 decimal places (SDK: f"{x:.8f}")
+    let str = price.toFixed(8);
 
-    // Also ensure max 6 decimal places for perps
-    const maxDecimals = Math.max(0, 6 - Math.max(0, magnitude + 1));
-    let str = rounded.toFixed(maxDecimals);
+    // Handle "-0.00000000" case
+    if (str === '-0.00000000') return '0';
 
-    // Remove trailing zeros
+    // Remove trailing zeros after decimal (matching Decimal.normalize())
     if (str.includes('.')) {
       str = str.replace(/\.?0+$/, '');
     }
@@ -500,22 +570,20 @@ export class HyperliquidRestClient {
   }
 
   /**
-   * Format size to wire format matching SDK
-   * Uses asset-specific decimals (default 8 for most perps)
+   * Format size to wire format matching Python SDK's float_to_wire exactly
+   * Simply formats to 8 decimal places and normalizes (removes trailing zeros)
    */
   private formatSize(size: number): string {
-    if (size === 0) return '0';
+    // Handle zero and negative zero
+    if (size === 0 || Object.is(size, -0)) return '0';
 
-    // Round to 8 decimal places
-    const rounded = Math.round(size * 1e8) / 1e8;
+    // Format to 8 decimal places (SDK: f"{x:.8f}")
+    let str = size.toFixed(8);
 
-    // Convert to string, handle scientific notation
-    let str = rounded.toString();
-    if (str.includes('e')) {
-      str = rounded.toFixed(8);
-    }
+    // Handle "-0.00000000" case
+    if (str === '-0.00000000') return '0';
 
-    // Remove trailing zeros
+    // Remove trailing zeros after decimal (matching Decimal.normalize())
     if (str.includes('.')) {
       str = str.replace(/\.?0+$/, '');
     }

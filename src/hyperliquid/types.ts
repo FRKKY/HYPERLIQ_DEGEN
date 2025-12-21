@@ -58,4 +58,24 @@ export interface CancelResponse {
   };
 }
 
-import { HyperliquidFill } from '../types';
+// Asset context from metaAndAssetCtxs endpoint
+export interface AssetContext {
+  coin: string;
+  dayNtlVlm: string;      // Daily notional volume
+  funding: string;        // Current funding rate
+  impactPxs: [string, string]; // Impact bid/ask prices
+  markPx: string;         // Mark price
+  midPx: string;          // Mid price
+  openInterest: string;   // Open interest in contracts
+  oraclePx: string;       // Oracle price
+  premium: string;        // Premium/basis
+  prevDayPx: string;      // Previous day price
+}
+
+// Response from metaAndAssetCtxs endpoint
+export interface MetaAndAssetCtxsResponse {
+  meta: HyperliquidMeta;
+  assetCtxs: AssetContext[];
+}
+
+import { HyperliquidFill, HyperliquidMeta } from '../types';

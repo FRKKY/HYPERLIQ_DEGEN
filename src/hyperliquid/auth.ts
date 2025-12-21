@@ -91,34 +91,27 @@ export class HyperliquidAuth {
 
   /**
    * Converts a float string to wire format matching Python SDK's float_to_wire()
-   * - Rounds to 8 significant decimals
-   * - Removes trailing zeros
-   * - Handles "-0" edge case
+   * Simply formats to 8 decimal places and normalizes (removes trailing zeros)
    */
   private floatToWire(value: string): string {
     if (!value || typeof value !== 'string') return value;
 
-    // Parse to number and back to handle precision
+    // Parse to number
     const num = parseFloat(value);
     if (isNaN(num)) return value;
 
-    // Handle -0 edge case
+    // Handle zero and -0 edge case (SDK: if rounded == "-0": rounded = "0")
     if (Object.is(num, -0) || num === 0) {
       return '0';
     }
 
-    // Round to 8 decimal places (matching SDK)
-    const rounded = Math.round(num * 1e8) / 1e8;
+    // Format to 8 decimal places (SDK: f"{x:.8f}")
+    let str = num.toFixed(8);
 
-    // Convert to string and normalize (remove trailing zeros)
-    let str = rounded.toString();
+    // Handle "-0.00000000" case
+    if (str === '-0.00000000') return '0';
 
-    // Handle scientific notation for very small numbers
-    if (str.includes('e')) {
-      str = rounded.toFixed(8);
-    }
-
-    // Remove trailing zeros after decimal point
+    // Remove trailing zeros after decimal (matching Decimal.normalize())
     if (str.includes('.')) {
       str = str.replace(/\.?0+$/, '');
     }

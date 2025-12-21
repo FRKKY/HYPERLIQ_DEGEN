@@ -59,6 +59,12 @@ export class DataCollector extends EventEmitter {
     // Start periodic funding rate fetching
     this.startFundingFetching();
 
+    // Start open interest collection
+    this.startOpenInterestFetching();
+
+    // Start account snapshot collection
+    this.startAccountSnapshotFetching();
+
     console.log('[DataCollector] Data collection started');
   }
 
@@ -216,6 +222,96 @@ export class DataCollector extends EventEmitter {
       '1d': 24 * 60 * 60 * 1000,
     };
     return durations[timeframe];
+  }
+
+  private startOpenInterestFetching(): void {
+    const fetchOpenInterest = async () => {
+      try {
+        const assetCtxs = await this.restClient.getAssetContexts();
+
+        const oiData = assetCtxs
+          .filter(ctx => this.symbols.includes(ctx.coin))
+          .map(ctx => ({
+            symbol: ctx.coin,
+            openInterest: parseFloat(ctx.openInterest),
+            openInterestValue: parseFloat(ctx.openInterest) * parseFloat(ctx.markPx),
+          }));
+
+        await this.db.insertOpenInterestBatch(oiData);
+        this.emit('openInterest', oiData);
+      } catch (error) {
+        console.error('[DataCollector] Failed to fetch open interest:', error);
+      }
+    };
+
+    // Delay initial fetch to let other data collection start first
+    setTimeout(() => {
+      console.log('[DataCollector] Starting open interest collection...');
+      fetchOpenInterest().catch(console.error);
+    }, 45000); // Start after 45 seconds
+
+    // Fetch every 15 minutes (OI doesn't change rapidly)
+    const interval = setInterval(() => {
+      fetchOpenInterest().catch(console.error);
+    }, 15 * 60 * 1000);
+
+    this.candleIntervals.set('openInterest', interval);
+  }
+
+  private startAccountSnapshotFetching(): void {
+    const fetchAccountSnapshot = async () => {
+      try {
+        const accountState = await this.restClient.getAccountState();
+
+        const equity = parseFloat(accountState.marginSummary.accountValue);
+        const totalMarginUsed = parseFloat(accountState.marginSummary.totalMarginUsed);
+        // Available balance = equity - margin used
+        const availableBalance = equity - totalMarginUsed;
+
+        // Calculate unrealized PnL from positions
+        const unrealizedPnl = accountState.assetPositions.reduce((sum, pos) => {
+          return sum + parseFloat(pos.position.unrealizedPnl);
+        }, 0);
+
+        // Get peak equity from system state if available
+        let peakEquity = equity;
+        try {
+          const systemState = await this.db.getSystemState();
+          peakEquity = Math.max(equity, systemState.peakEquity || equity);
+        } catch {
+          // System state might not be available, use current equity
+        }
+
+        const drawdownPct = peakEquity > 0 ? ((peakEquity - equity) / peakEquity) * 100 : 0;
+
+        await this.db.insertAccountSnapshot(
+          equity,
+          availableBalance,
+          totalMarginUsed,
+          unrealizedPnl,
+          0, // realizedPnl24h - would need trade history to calculate
+          peakEquity,
+          drawdownPct
+        );
+
+        this.emit('accountSnapshot', { equity, availableBalance, totalMarginUsed, unrealizedPnl, drawdownPct });
+      } catch (error) {
+        console.error('[DataCollector] Failed to fetch account snapshot:', error);
+      }
+    };
+
+    // Delay initial fetch to let account state be established first
+    setTimeout(() => {
+      console.log('[DataCollector] Starting account snapshot collection...');
+      fetchAccountSnapshot().catch(console.error);
+    }, 60000); // Start after 1 minute
+
+    // Fetch every 5 minutes
+    const interval = setInterval(() => {
+      fetchAccountSnapshot().catch(console.error);
+    }, 5 * 60 * 1000);
+
+    this.candleIntervals.set('accountSnapshot', interval);
   }
 
   private sleep(ms: number): Promise<void> {

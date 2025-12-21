@@ -202,6 +202,51 @@ export class Database {
     }));
   }
 
+  // ===== OPEN INTEREST =====
+
+  async insertOpenInterest(symbol: string, openInterest: number, openInterestValue?: number): Promise<void> {
+    await this.pool.query(
+      `INSERT INTO open_interest (symbol, recorded_at, open_interest, open_interest_value)
+       VALUES ($1, NOW(), $2, $3)`,
+      [symbol, openInterest, openInterestValue]
+    );
+  }
+
+  async insertOpenInterestBatch(data: Array<{ symbol: string; openInterest: number; openInterestValue?: number }>): Promise<void> {
+    if (data.length === 0) return;
+
+    const client = await this.pool.connect();
+    try {
+      await client.query('BEGIN');
+      for (const item of data) {
+        await client.query(
+          `INSERT INTO open_interest (symbol, recorded_at, open_interest, open_interest_value)
+           VALUES ($1, NOW(), $2, $3)`,
+          [item.symbol, item.openInterest, item.openInterestValue]
+        );
+      }
+      await client.query('COMMIT');
+    } catch (error) {
+      await client.query('ROLLBACK');
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
+  async getOpenInterestHistory(symbol: string, hours: number = 24): Promise<{ recordedAt: Date; openInterest: number }[]> {
+    const result = await this.pool.query(
+      `SELECT recorded_at as "recordedAt", open_interest as "openInterest"
+       FROM open_interest WHERE symbol = $1 AND recorded_at > NOW() - INTERVAL '${hours} hours'
+       ORDER BY recorded_at DESC`,
+      [symbol]
+    );
+    return result.rows.map((r) => ({
+      recordedAt: r.recordedAt,
+      openInterest: Number(r.openInterest),
+    }));
+  }
+
   // ===== SIGNALS =====
 
   async insertSignal(signal: Signal): Promise<void> {
