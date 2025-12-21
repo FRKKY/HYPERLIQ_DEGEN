@@ -403,10 +403,18 @@ async function runMigrations(): Promise<void> {
     throw new Error('DATABASE_URL not set');
   }
 
+  // Log connection attempt (mask password)
+  const maskedUrl = databaseUrl.replace(/:[^:@]+@/, ':***@');
+  console.log(`[Migrations] Connecting to: ${maskedUrl}`);
+  console.log(`[Migrations] NODE_ENV: ${process.env.NODE_ENV}`);
+
   const pool = new Pool({
     connectionString: databaseUrl,
     ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : undefined,
+    connectionTimeoutMillis: 10000, // 10 second timeout
   });
+
+  console.log('[Migrations] Pool created, attempting connection...');
 
   try {
     await pool.query(`

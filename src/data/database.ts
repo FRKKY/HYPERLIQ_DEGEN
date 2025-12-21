@@ -52,8 +52,16 @@ export class Database {
   }
 
   async connect(): Promise<void> {
+    // Log connection attempt (mask password)
+    const dbUrl = process.env.DATABASE_URL || '';
+    const maskedUrl = dbUrl.replace(/:[^:@]+@/, ':***@');
+    console.log(`[Database] Attempting to connect to: ${maskedUrl}`);
+    console.log(`[Database] NODE_ENV: ${process.env.NODE_ENV}`);
+
     try {
+      console.log('[Database] Acquiring client from pool...');
       const client = await this.pool.connect();
+      console.log('[Database] Client acquired, testing connection...');
       await client.query('SELECT 1'); // Verify connection works
       client.release();
       logger.info('Database', 'Connected to PostgreSQL', {
@@ -61,6 +69,7 @@ export class Database {
         idleCount: this.pool.idleCount,
       });
     } catch (error) {
+      console.error('[Database] Connection failed:', error);
       logger.error('Database', 'Failed to connect to PostgreSQL', {
         error: error instanceof Error ? error.message : 'Unknown error',
       });
