@@ -65,6 +65,25 @@ export class OrderManager {
         strategyConfig.capitalUtilization
       );
 
+      // Hyperliquid requires minimum $10 order value
+      const notionalValue = positionSize.size * entryPrice;
+      if (notionalValue < 10) {
+        console.log(`[OrderManager] Order too small: $${notionalValue.toFixed(2)} (min $10)`);
+        return { success: false, reason: `Order value too small: $${notionalValue.toFixed(2)} (minimum $10)` };
+      }
+
+      console.log(`[OrderManager] Position calculation:`, {
+        symbol: signal.symbol,
+        allocation,
+        equity,
+        entryPrice,
+        stopLoss,
+        size: positionSize.size,
+        leverage: positionSize.leverage,
+        notionalValue,
+        marginRequired: positionSize.marginRequired,
+      });
+
       // 4. Set leverage if needed
       try {
         await this.client.updateLeverage(signal.symbol, positionSize.leverage);
