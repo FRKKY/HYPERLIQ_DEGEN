@@ -139,20 +139,28 @@ export class HyperliquidAuth {
     const view = new DataView(nonceBytes.buffer);
     view.setBigUint64(0, BigInt(nonce), false); // false = big-endian
 
-    // Vault address: 20 bytes if provided, zeros otherwise
-    // Per Chainstack example: msgpack || vault (20 bytes) || nonce
-    let vaultBytes: Uint8Array;
-    if (vaultAddress) {
-      // IMPORTANT: Vault address must be lowercase per Hyperliquid docs
-      const normalizedVault = vaultAddress.toLowerCase();
-      vaultBytes = ethers.utils.arrayify(normalizedVault);
-    } else {
-      // Zero-filled 20 bytes when no vault
-      vaultBytes = new Uint8Array(20);
-    }
+    // Build data buffer matching Python SDK's action_hash:
+    // msgpack(action) + nonce(8 bytes) + vault_indicator + [vault_address]
+    let data: Uint8Array;
 
-    // Concatenate: msgpack action + vault address (20 bytes) + nonce (8 bytes)
-    const data = new Uint8Array([...msgPackAction, ...vaultBytes, ...nonceBytes]);
+    if (vaultAddress) {
+      // With vault: msgpack + nonce + 0x01 + vault_address(20 bytes)
+      const normalizedVault = vaultAddress.toLowerCase();
+      const vaultBytes = ethers.utils.arrayify(normalizedVault);
+      data = new Uint8Array([
+        ...msgPackAction,
+        ...nonceBytes,
+        0x01,  // vault present indicator
+        ...vaultBytes,
+      ]);
+    } else {
+      // Without vault: msgpack + nonce + 0x00
+      data = new Uint8Array([
+        ...msgPackAction,
+        ...nonceBytes,
+        0x00,  // no vault indicator
+      ]);
+    }
 
     // Return keccak256 hash as bytes32
     return ethers.utils.keccak256(data);
