@@ -54,12 +54,14 @@ class TradingSystem {
     }
     this.restClient = new HyperliquidRestClient(this.auth, config.hyperliquid.useTestnet);
     await this.restClient.initialize();
-    this.wsClient = new HyperliquidWebSocket(config.hyperliquid.useTestnet);
 
-    // Initialize system state with actual account equity
+    // CRITICAL: Get account state FIRST before any other API calls
+    // This must happen before data collector starts flooding the API
     await this.initializeSystemState(config.trading.initialCapital);
 
-    // Initialize data collector
+    this.wsClient = new HyperliquidWebSocket(config.hyperliquid.useTestnet);
+
+    // Initialize data collector (will start later, after system is ready)
     this.dataCollector = new DataCollector(this.restClient, this.wsClient, this.db);
 
     // Initialize execution components
@@ -185,8 +187,9 @@ class TradingSystem {
 
     const config = loadConfig();
 
-    // Start data collection
-    await this.dataCollector.start();
+    // Start data collection (limit symbols on testnet to avoid rate limits)
+    const isTestnet = this.environment === 'testnet';
+    await this.dataCollector.start(undefined, isTestnet);
 
     // Schedule trading cycle (every minute)
     cron.schedule('* * * * *', async () => {

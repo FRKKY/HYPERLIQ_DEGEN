@@ -18,14 +18,23 @@ export class DataCollector extends EventEmitter {
     this.db = db;
   }
 
-  async start(symbols?: string[]): Promise<void> {
+  async start(symbols?: string[], isTestnet: boolean = false): Promise<void> {
     if (this.isRunning) return;
     this.isRunning = true;
 
     // Get all symbols if not provided
     if (!symbols) {
       await this.restClient.initialize();
-      this.symbols = this.restClient.getAllSymbols();
+      let allSymbols = this.restClient.getAllSymbols();
+
+      // On testnet, limit to top liquid symbols to avoid rate limits
+      if (isTestnet) {
+        const prioritySymbols = ['BTC', 'ETH', 'SOL', 'DOGE', 'XRP', 'BNB', 'ADA', 'AVAX', 'MATIC', 'LINK'];
+        this.symbols = allSymbols.filter(s => prioritySymbols.includes(s)).slice(0, 10);
+        console.log(`[DataCollector] Testnet mode: limiting to ${this.symbols.length} priority symbols`);
+      } else {
+        this.symbols = allSymbols;
+      }
     } else {
       this.symbols = symbols;
     }
