@@ -1,0 +1,42 @@
+# Environment
+.env
+.env.local
+
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+logs/
+
+# Python (if any scripts)
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Testing
+coverage/
+.nyc_output/
+
+# Railway
+.fly/
+
+# Package managers
+*.egg-info/
+
+# Cache
+.cache/
+.pytest_cache/
+.mypy_cache/
