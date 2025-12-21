@@ -1,6 +1,3 @@
-import { createWriteStream, WriteStream } from 'fs';
-import { join } from 'path';
-
 export type LogLevel = 'debug' | 'info' | 'warn' | 'error';
 
 interface LogEntry {
@@ -21,21 +18,10 @@ const LOG_LEVELS: Record<LogLevel, number> = {
 
 class Logger {
   private minLevel: LogLevel;
-  private fileStream: WriteStream | null = null;
   private correlationId: string | null = null;
 
   constructor() {
     this.minLevel = (process.env.LOG_LEVEL as LogLevel) || 'info';
-
-    // Create file stream for production
-    if (process.env.NODE_ENV === 'production') {
-      const logDir = process.env.LOG_DIR || '/var/log/trading-system';
-      try {
-        this.fileStream = createWriteStream(join(logDir, 'app.log'), { flags: 'a' });
-      } catch {
-        // Fall back to console only
-      }
-    }
   }
 
   setCorrelationId(id: string): void {
@@ -86,10 +72,6 @@ class Logger {
       console.log(`${colors[level]}[${entry.timestamp}] [${level.toUpperCase()}] [${component}] ${message}${dataStr}${reset}`);
     }
 
-    // Write to file if available
-    if (this.fileStream) {
-      this.fileStream.write(formatted + '\n');
-    }
   }
 
   debug(component: string, message: string, data?: Record<string, unknown>): void {
