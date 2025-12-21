@@ -33,6 +33,7 @@ export class HyperliquidRestClient {
   private client: AxiosInstance;
   private auth: HyperliquidAuth;
   private assetIndexMap: Map<string, number> = new Map();
+  private assetSzDecimalsMap: Map<string, number> = new Map();  // Size decimals per asset
   private meta: HyperliquidMeta | null = null;
   private infoUrl: string;
   private exchangeUrl: string;
@@ -143,8 +144,13 @@ export class HyperliquidRestClient {
     this.meta = await this.getMeta();
     this.meta.universe.forEach((asset, index) => {
       this.assetIndexMap.set(asset.name, index);
+      this.assetSzDecimalsMap.set(asset.name, asset.szDecimals);
     });
     logger.info('Hyperliquid', 'Initialized', { assets: this.assetIndexMap.size });
+  }
+
+  getSzDecimals(coin: string): number {
+    return this.assetSzDecimalsMap.get(coin) ?? 8;  // Default to 8 if not found
   }
 
   // ===== INFO ENDPOINTS =====
@@ -297,11 +303,17 @@ export class HyperliquidRestClient {
     const price = isBuy ? midPrice * (1 + slippage) : midPrice * (1 - slippage);
 
     const assetIndex = this.coinToAssetIndex(coin);
+    const szDecimals = this.getSzDecimals(coin);
+
+    // Round size to asset-specific decimals
+    const roundedSize = this.roundToDecimals(size, szDecimals);
 
     logger.trade('Place market order', {
       coin,
       side: isBuy ? 'BUY' : 'SELL',
       size,
+      roundedSize,
+      szDecimals,
       midPrice,
       price,
       assetIndex,
@@ -312,10 +324,15 @@ export class HyperliquidRestClient {
       asset: assetIndex,
       isBuy,
       price,
-      size,
+      size: roundedSize,
       reduceOnly,
       orderType: { limit: { tif: 'Ioc' } }, // Immediate-or-cancel for market-like behavior
     });
+  }
+
+  private roundToDecimals(value: number, decimals: number): number {
+    const factor = Math.pow(10, decimals);
+    return Math.floor(value * factor) / factor;  // Floor to avoid over-buying
   }
 
   async cancelOrder(coin: string, oid: number): Promise<CancelResponse> {
