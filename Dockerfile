@@ -36,6 +36,9 @@ COPY --from=builder --chown=nodejs:nodejs /app/node_modules ./node_modules
 COPY --from=builder --chown=nodejs:nodejs /app/dist ./dist
 COPY --from=builder --chown=nodejs:nodejs /app/package.json ./
 
+# Copy migrations
+COPY --chown=nodejs:nodejs migrations/ ./migrations/
+
 # Copy config file if exists
 COPY --chown=nodejs:nodejs config.yaml* ./
 
