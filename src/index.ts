@@ -27,7 +27,7 @@ class TradingSystem {
   private signalAggregator!: SignalAggregator;
   private mclOrchestrator!: MCLOrchestrator;
   private alertManager!: AlertManager;
-  private telegramBot!: TradingTelegramBot;
+  private telegramBot?: TradingTelegramBot;
   private dashboardServer!: DashboardServer;
   private strategyPromoter!: StrategyPromoter;
   private environment!: Environment;
@@ -87,9 +87,15 @@ class TradingSystem {
     // Initialize monitoring
     this.alertManager = new AlertManager(this.db);
 
-    this.telegramBot = new TradingTelegramBot(config.telegram.botToken, config.telegram.chatId, this.db);
-    this.telegramBot.setSystemController(this.createSystemController());
-    this.alertManager.setTelegramBot(this.telegramBot);
+    // Telegram bot is optional
+    if (config.telegram.botToken && config.telegram.chatId) {
+      this.telegramBot = new TradingTelegramBot(config.telegram.botToken, config.telegram.chatId, this.db);
+      this.telegramBot.setSystemController(this.createSystemController());
+      this.alertManager.setTelegramBot(this.telegramBot);
+      console.log('[System] Telegram bot enabled');
+    } else {
+      console.log('[System] Telegram bot disabled (no credentials)');
+    }
 
     this.dashboardServer = new DashboardServer(config.app.port, this.db);
     this.dashboardServer.setSystemController(this.createSystemController());
@@ -321,7 +327,9 @@ class TradingSystem {
         dashboardUrl: `http://localhost:${process.env.PORT || 3000}`,
       };
 
-      await this.telegramBot.sendDailyReport(report);
+      if (this.telegramBot) {
+        await this.telegramBot.sendDailyReport(report);
+      }
       console.log('[System] Daily report sent');
     } catch (error) {
       console.error('[System] Error generating daily report:', error);
@@ -332,7 +340,9 @@ class TradingSystem {
     console.log('[System] Stopping trading system...');
 
     this.dataCollector.stop();
-    this.telegramBot.stop();
+    if (this.telegramBot) {
+      this.telegramBot.stop();
+    }
     this.dashboardServer.stop();
     await this.db.disconnect();
 

@@ -19,8 +19,8 @@ export function loadConfig(): Config {
       apiKey: getEnvVar('ANTHROPIC_API_KEY'),
     },
     telegram: {
-      botToken: getEnvVar('TELEGRAM_BOT_TOKEN'),
-      chatId: getEnvVar('TELEGRAM_CHAT_ID'),
+      botToken: getEnvVar('TELEGRAM_BOT_TOKEN', ''),
+      chatId: getEnvVar('TELEGRAM_CHAT_ID', ''),
     },
     database: {
       url: getEnvVar('DATABASE_URL'),
