@@ -80,9 +80,18 @@ export class OrderManager {
       // 6. Execute order
       const result = await this.client.placeMarketOrder(signal.symbol, isBuy, positionSize.size, isClose);
 
+      // Log full response for debugging
+      console.log(`[OrderManager] Order response:`, JSON.stringify(result, null, 2));
+
       if (result.status === 'ok') {
         const status = result.response?.data?.statuses?.[0];
         const orderId = status?.resting?.oid || status?.filled?.oid;
+
+        // Check for error in status
+        if (status?.error) {
+          console.error(`[OrderManager] Order error from exchange:`, status.error);
+          return { success: false, reason: status.error };
+        }
 
         // 7. Log trade with environment and version info
         await this.db.query(
@@ -140,8 +149,23 @@ export class OrderManager {
         console.error(`[OrderManager] Order failed:`, errorMsg);
         return { success: false, reason: errorMsg };
       }
-    } catch (error) {
-      const errorMsg = error instanceof Error ? error.message : 'Unknown error';
+    } catch (error: unknown) {
+      // Extract detailed error info from axios errors
+      let errorMsg = 'Unknown error';
+      if (error instanceof Error) {
+        errorMsg = error.message;
+      }
+      // Check for axios error with response data
+      if (error && typeof error === 'object' && 'response' in error) {
+        const axiosError = error as { response?: { data?: unknown; status?: number } };
+        if (axiosError.response?.data) {
+          console.error(`[OrderManager] API response error:`, JSON.stringify(axiosError.response.data, null, 2));
+          errorMsg = JSON.stringify(axiosError.response.data);
+        }
+        if (axiosError.response?.status) {
+          console.error(`[OrderManager] HTTP status:`, axiosError.response.status);
+        }
+      }
       console.error(`[OrderManager] Execution error:`, error);
       return { success: false, reason: errorMsg };
     }

@@ -246,14 +246,34 @@ export class HyperliquidRestClient {
       price: order.price,
       size: order.size,
       reduceOnly: order.reduceOnly,
+      formattedPrice: this.formatPrice(order.price),
+      formattedSize: this.formatSize(order.size),
     });
 
-    // Exchange requests should not use retry - order might have been placed
-    return this.request('order', {
+    // Log the full request for debugging
+    const requestPayload = {
       action,
       nonce,
       signature,
-    }, true);
+    };
+    logger.debug('Hyperliquid', 'Order request payload', { payload: JSON.stringify(requestPayload) });
+
+    // Exchange requests should not use retry - order might have been placed
+    try {
+      const response = await this.request<OrderResponse>('order', requestPayload, true);
+      logger.debug('Hyperliquid', 'Order response', { response: JSON.stringify(response) });
+      return response;
+    } catch (error: unknown) {
+      // Log detailed error info
+      if (error && typeof error === 'object' && 'response' in error) {
+        const axiosError = error as { response?: { data?: unknown; status?: number } };
+        logger.error('Hyperliquid', 'Order request failed', {
+          status: axiosError.response?.status,
+          data: JSON.stringify(axiosError.response?.data),
+        });
+      }
+      throw error;
+    }
   }
 
   async placeMarketOrder(
