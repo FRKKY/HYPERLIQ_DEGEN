@@ -26,8 +26,9 @@ export class HyperliquidAuth {
     this.isTestnet = isTestnet;
   }
 
+  // IMPORTANT: Hyperliquid docs state addresses must be lowercase for signing
   get address(): string {
-    return this.wallet.address;
+    return this.wallet.address.toLowerCase();
   }
 
   async signL1Action(
@@ -58,33 +59,71 @@ export class HyperliquidAuth {
     // Deep clone the action
     const normalized = JSON.parse(JSON.stringify(action));
 
-    // Normalize orders if present
+    // Normalize orders if present (price and size strings)
     if (normalized.orders && Array.isArray(normalized.orders)) {
       normalized.orders = normalized.orders.map((order: Record<string, unknown>) => ({
         ...order,
-        p: this.removeTrailingZeros(order.p as string),
-        s: this.removeTrailingZeros(order.s as string),
+        p: this.floatToWire(order.p as string),
+        s: this.floatToWire(order.s as string),
       }));
+    }
+
+    // Normalize modifies if present (batch modify orders)
+    if (normalized.modifies && Array.isArray(normalized.modifies)) {
+      normalized.modifies = normalized.modifies.map((mod: Record<string, unknown>) => {
+        if (mod.order && typeof mod.order === 'object') {
+          const order = mod.order as Record<string, unknown>;
+          return {
+            ...mod,
+            order: {
+              ...order,
+              p: this.floatToWire(order.p as string),
+              s: this.floatToWire(order.s as string),
+            },
+          };
+        }
+        return mod;
+      });
     }
 
     return normalized;
   }
 
-  private removeTrailingZeros(value: string): string {
+  /**
+   * Converts a float string to wire format matching Python SDK's float_to_wire()
+   * - Rounds to 8 significant decimals
+   * - Removes trailing zeros
+   * - Handles "-0" edge case
+   */
+  private floatToWire(value: string): string {
     if (!value || typeof value !== 'string') return value;
-    // Remove trailing zeros after decimal point
-    if (value.includes('.')) {
-      let result = value.replace(/\.?0+$/, '');
-      // Ensure at least one digit after decimal if there was a decimal
-      if (result.includes('.') === false && value.includes('.')) {
-        result = value.replace(/0+$/, '');
-        if (result.endsWith('.')) {
-          result = result.slice(0, -1);
-        }
-      }
-      return result;
+
+    // Parse to number and back to handle precision
+    const num = parseFloat(value);
+    if (isNaN(num)) return value;
+
+    // Handle -0 edge case
+    if (Object.is(num, -0) || num === 0) {
+      return '0';
     }
-    return value;
+
+    // Round to 8 decimal places (matching SDK)
+    const rounded = Math.round(num * 1e8) / 1e8;
+
+    // Convert to string and normalize (remove trailing zeros)
+    let str = rounded.toString();
+
+    // Handle scientific notation for very small numbers
+    if (str.includes('e')) {
+      str = rounded.toFixed(8);
+    }
+
+    // Remove trailing zeros after decimal point
+    if (str.includes('.')) {
+      str = str.replace(/\.?0+$/, '');
+    }
+
+    return str;
   }
 
   private hashAction(
@@ -101,9 +140,12 @@ export class HyperliquidAuth {
     view.setBigUint64(0, BigInt(nonce), false); // false = big-endian
 
     // Concatenate msgpack action + nonce + optional vault address
+    // Order matches Python SDK: action || nonce || vault
     let data: Uint8Array;
     if (vaultAddress) {
-      const vaultBytes = ethers.utils.arrayify(vaultAddress);
+      // IMPORTANT: Vault address must be lowercase per Hyperliquid docs
+      const normalizedVault = vaultAddress.toLowerCase();
+      const vaultBytes = ethers.utils.arrayify(normalizedVault);
       data = new Uint8Array([...msgPackAction, ...nonceBytes, ...vaultBytes]);
     } else {
       data = new Uint8Array([...msgPackAction, ...nonceBytes]);

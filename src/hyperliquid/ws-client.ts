@@ -143,11 +143,13 @@ export class HyperliquidWebSocket extends EventEmitter {
   }
 
   subscribeUserEvents(address: string): void {
+    // IMPORTANT: Address must be lowercase per Hyperliquid docs
+    const userAddress = address.toLowerCase();
     const sub: Subscription = {
       method: 'subscribe',
-      subscription: { type: 'userEvents', user: address },
+      subscription: { type: 'userEvents', user: userAddress },
     };
-    this.subscriptions.set(`userEvents:${address}`, sub);
+    this.subscriptions.set(`userEvents:${userAddress}`, sub);
     this.send(sub);
   }
 

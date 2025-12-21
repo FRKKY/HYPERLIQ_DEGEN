@@ -158,23 +158,27 @@ export class HyperliquidRestClient {
   }
 
   async getAccountState(address?: string): Promise<HyperliquidAccountInfo> {
+    // IMPORTANT: Address must be lowercase per Hyperliquid docs
+    const userAddress = (address || this.auth.address).toLowerCase();
     return this.requestWithRetry('clearinghouseState', {
       type: 'clearinghouseState',
-      user: address || this.auth.address,
+      user: userAddress,
     });
   }
 
   async getOpenOrders(address?: string): Promise<HyperliquidOpenOrder[]> {
+    const userAddress = (address || this.auth.address).toLowerCase();
     return this.requestWithRetry('openOrders', {
       type: 'openOrders',
-      user: address || this.auth.address,
+      user: userAddress,
     });
   }
 
   async getUserFills(address?: string): Promise<HyperliquidFill[]> {
+    const userAddress = (address || this.auth.address).toLowerCase();
     return this.requestWithRetry('userFills', {
       type: 'userFills',
-      user: address || this.auth.address,
+      user: userAddress,
     });
   }
 
@@ -225,8 +229,8 @@ export class HyperliquidRestClient {
         {
           a: order.asset,
           b: order.isBuy,
-          p: order.price.toString(),
-          s: order.size.toString(),
+          p: this.formatPrice(order.price),
+          s: this.formatSize(order.size),
           r: order.reduceOnly || false,
           t: order.orderType || { limit: { tif: 'Gtc' } },
         },
@@ -420,5 +424,53 @@ export class HyperliquidRestClient {
 
   getRateLimitStats(): { pending: number; requestsInWindow: number; windowMs: number } {
     return hyperliquidRateLimiter.getStats();
+  }
+
+  /**
+   * Format price to wire format matching SDK's approach
+   * Uses 5 significant figures and removes trailing zeros
+   */
+  private formatPrice(price: number): string {
+    if (price === 0) return '0';
+
+    // Round to 5 significant figures (matching SDK slippage_price)
+    const magnitude = Math.floor(Math.log10(Math.abs(price)));
+    const scale = Math.pow(10, 4 - magnitude); // 5 sig figs = 4 - magnitude
+    const rounded = Math.round(price * scale) / scale;
+
+    // Also ensure max 6 decimal places for perps
+    const maxDecimals = Math.max(0, 6 - Math.max(0, magnitude + 1));
+    let str = rounded.toFixed(maxDecimals);
+
+    // Remove trailing zeros
+    if (str.includes('.')) {
+      str = str.replace(/\.?0+$/, '');
+    }
+
+    return str;
+  }
+
+  /**
+   * Format size to wire format matching SDK
+   * Uses asset-specific decimals (default 8 for most perps)
+   */
+  private formatSize(size: number): string {
+    if (size === 0) return '0';
+
+    // Round to 8 decimal places
+    const rounded = Math.round(size * 1e8) / 1e8;
+
+    // Convert to string, handle scientific notation
+    let str = rounded.toString();
+    if (str.includes('e')) {
+      str = rounded.toFixed(8);
+    }
+
+    // Remove trailing zeros
+    if (str.includes('.')) {
+      str = str.replace(/\.?0+$/, '');
+    }
+
+    return str;
   }
 }
