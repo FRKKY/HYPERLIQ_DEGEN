@@ -281,14 +281,26 @@ export class HyperliquidRestClient {
 
   async placeOrder(order: OrderRequest): Promise<OrderResponse> {
     const nonce = Date.now();
+    const formattedPrice = this.formatPrice(order.price);
+    const formattedSize = this.formatSize(order.size);
+
+    // Debug: Log exact values being sent
+    logger.debug('Hyperliquid', 'Order wire format', {
+      asset: order.asset,
+      rawPrice: order.price,
+      formattedPrice,
+      rawSize: order.size,
+      formattedSize,
+    });
+
     const action = {
       type: 'order',
       orders: [
         {
           a: order.asset,
           b: order.isBuy,
-          p: this.formatPrice(order.price),
-          s: this.formatSize(order.size),
+          p: formattedPrice,
+          s: formattedSize,
           r: order.reduceOnly || false,
           t: order.orderType || { limit: { tif: 'Gtc' } },
         },
@@ -351,12 +363,16 @@ export class HyperliquidRestClient {
     }
 
     // For market orders, use a price that will fill immediately
-    // Using slippagePrice to match SDK's 5 significant figure rounding
     const slippage = 0.01; // 1%
-    const price = this.slippagePrice(isBuy, slippage, midPrice);
 
     const assetIndex = this.coinToAssetIndex(coin);
     const szDecimals = this.getSzDecimals(coin);
+
+    // Calculate max price decimals: for perps, MAX_DECIMALS(6) - szDecimals
+    const maxPriceDecimals = Math.max(0, 6 - szDecimals);
+
+    // Apply slippage and round to valid price (5 sig figs, max decimals)
+    const price = this.slippagePrice(isBuy, slippage, midPrice, maxPriceDecimals);
 
     // Round size to asset-specific decimals
     const roundedSize = this.roundToDecimals(size, szDecimals);
@@ -367,6 +383,7 @@ export class HyperliquidRestClient {
       size,
       roundedSize,
       szDecimals,
+      maxPriceDecimals,
       midPrice,
       price,
       assetIndex,
@@ -390,11 +407,21 @@ export class HyperliquidRestClient {
 
   /**
    * Calculate slippage price matching Python SDK's slippage_price()
-   * Applies slippage and rounds to 5 significant figures
+   * Applies slippage and rounds to valid price format:
+   * - Max 5 significant figures
+   * - Max (6 - szDecimals) decimal places for perps
    */
-  private slippagePrice(isBuy: boolean, slippage: number, px: number): number {
+  private slippagePrice(isBuy: boolean, slippage: number, px: number, maxDecimals: number = 6): number {
     const adjustedPx = isBuy ? px * (1 + slippage) : px * (1 - slippage);
-    return this.roundToSigFigs(adjustedPx, 5);
+
+    // First round to 5 significant figures
+    let rounded = this.roundToSigFigs(adjustedPx, 5);
+
+    // Then enforce max decimal places
+    const factor = Math.pow(10, maxDecimals);
+    rounded = Math.round(rounded * factor) / factor;
+
+    return rounded;
   }
 
   /**
