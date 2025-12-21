@@ -350,8 +350,78 @@ class TradingSystem {
   }
 }
 
+// Run migrations inline
+async function runMigrations(): Promise<void> {
+  const { Pool } = await import('pg');
+  const { readFileSync, readdirSync } = await import('fs');
+  const { join } = await import('path');
+
+  const databaseUrl = process.env.DATABASE_URL;
+  if (!databaseUrl) {
+    throw new Error('DATABASE_URL not set');
+  }
+
+  const pool = new Pool({
+    connectionString: databaseUrl,
+    ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : undefined,
+  });
+
+  try {
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS schema_migrations (
+        id SERIAL PRIMARY KEY,
+        filename VARCHAR(255) NOT NULL UNIQUE,
+        executed_at TIMESTAMPTZ DEFAULT NOW()
+      )
+    `);
+
+    const result = await pool.query('SELECT filename FROM schema_migrations');
+    const executed = new Set(result.rows.map((r: { filename: string }) => r.filename));
+
+    const migrationsDir = join(__dirname, '..', 'migrations');
+    const files = readdirSync(migrationsDir).filter(f => f.endsWith('.sql')).sort();
+
+    console.log(`[Migrations] Found ${files.length} migration files`);
+
+    for (const file of files) {
+      if (executed.has(file)) {
+        console.log(`[Migrations] Skipping ${file} (already executed)`);
+        continue;
+      }
+
+      console.log(`[Migrations] Running: ${file}`);
+      const sql = readFileSync(join(migrationsDir, file), 'utf-8');
+
+      await pool.query('BEGIN');
+      try {
+        await pool.query(sql);
+        await pool.query('INSERT INTO schema_migrations (filename) VALUES ($1)', [file]);
+        await pool.query('COMMIT');
+        console.log(`[Migrations] Completed: ${file}`);
+      } catch (error) {
+        await pool.query('ROLLBACK');
+        throw error;
+      }
+    }
+
+    console.log('[Migrations] All migrations completed');
+  } finally {
+    await pool.end();
+  }
+}
+
 // Main entry point
 async function main() {
+  console.log('[System] Starting...');
+
+  // Run migrations first
+  try {
+    await runMigrations();
+  } catch (error) {
+    console.error('[System] Migration failed:', error);
+    process.exit(1);
+  }
+
   const system = new TradingSystem();
 
   // Handle graceful shutdown
