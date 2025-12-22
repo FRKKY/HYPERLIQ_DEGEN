@@ -34,19 +34,19 @@ CREATE INDEX idx_backtest_results_strategy ON backtest_results(strategy_name, ba
 CREATE INDEX idx_backtest_results_passed ON backtest_results(strategy_name, validation_passed);
 
 -- Backtest validation criteria (minimum requirements for live trading)
--- Thresholds from manifesto Phase 3: Backtest Validation
+-- Tightened thresholds for statistical confidence and risk management
 CREATE TABLE backtest_validation_criteria (
     id SERIAL PRIMARY KEY,
     strategy_name VARCHAR(50),  -- NULL means default criteria for all strategies
-    min_data_days INTEGER NOT NULL DEFAULT 30,
-    min_trades INTEGER NOT NULL DEFAULT 10,
-    min_sharpe_ratio DECIMAL(5, 2) NOT NULL DEFAULT 0.5,  -- Manifesto: Sharpe > 0.5
-    max_drawdown_pct DECIMAL(5, 2) NOT NULL DEFAULT -30.0,  -- Manifesto: Max DD < 30%
-    min_win_rate_pct DECIMAL(5, 2) NOT NULL DEFAULT 35.0,
-    min_profit_factor DECIMAL(5, 2) NOT NULL DEFAULT 1.0,
-    max_consecutive_losses INTEGER NOT NULL DEFAULT 7,  -- Manifesto: No strategy > 7 consecutive losses
-    min_return_pct DECIMAL(5, 2) NOT NULL DEFAULT -10.0,  -- Allow small negative but not catastrophic
-    require_fresh_backtest_days INTEGER NOT NULL DEFAULT 7,  -- Backtest must be within N days
+    min_data_days INTEGER NOT NULL DEFAULT 90,           -- 3 months minimum for regime coverage
+    min_trades INTEGER NOT NULL DEFAULT 100,             -- Statistical significance
+    min_sharpe_ratio DECIMAL(5, 2) NOT NULL DEFAULT 1.0, -- Institutional standard
+    max_drawdown_pct DECIMAL(5, 2) NOT NULL DEFAULT -15.0, -- Tight risk control
+    min_win_rate_pct DECIMAL(5, 2) NOT NULL DEFAULT 40.0,  -- Reasonable for trend-following
+    min_profit_factor DECIMAL(5, 2) NOT NULL DEFAULT 1.5,  -- Must be clearly profitable
+    max_consecutive_losses INTEGER NOT NULL DEFAULT 7,     -- Manifesto requirement
+    min_return_pct DECIMAL(5, 2) NOT NULL DEFAULT 0.0,     -- Must be profitable
+    require_fresh_backtest_days INTEGER NOT NULL DEFAULT 7,
     created_at TIMESTAMPTZ DEFAULT NOW(),
     updated_at TIMESTAMPTZ DEFAULT NOW(),
     UNIQUE(strategy_name)

@@ -22,16 +22,16 @@ export interface ValidationResult {
   warnings: string[];
 }
 
-// Thresholds from manifesto Phase 3: Backtest Validation
+// Tightened thresholds for statistical confidence and risk management
 const DEFAULT_CRITERIA: ValidationCriteria = {
-  minDataDays: 30,
-  minTrades: 10,
-  minSharpeRatio: 0.5,        // Manifesto: Sharpe > 0.5
-  maxDrawdownPct: -30.0,      // Manifesto: Max DD < 30%
-  minWinRatePct: 35.0,
-  minProfitFactor: 1.0,
-  maxConsecutiveLosses: 7,    // Manifesto: No strategy > 7 consecutive losses
-  minReturnPct: -10.0,
+  minDataDays: 90,            // 3 months minimum for regime coverage
+  minTrades: 100,             // Statistical significance
+  minSharpeRatio: 1.0,        // Institutional standard
+  maxDrawdownPct: -15.0,      // Tight risk control
+  minWinRatePct: 40.0,        // Reasonable for trend-following
+  minProfitFactor: 1.5,       // Must be clearly profitable
+  maxConsecutiveLosses: 7,    // Manifesto requirement
+  minReturnPct: 0.0,          // Must be profitable
   requireFreshBacktestDays: 7,
 };
 
