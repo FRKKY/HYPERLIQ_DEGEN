@@ -6,14 +6,16 @@ import { OrderManager } from '../execution/order-manager';
 import { SystemEvaluator } from './system-evaluator';
 import { AgentEvaluator } from './agent-evaluator';
 import { ConflictArbitrator } from './conflict-arbitrator';
+import { RiskControlAgent } from './risk-control-agent';
 import { DecisionEngine, MCLDecisionEngineOutput } from './decision-engine';
 import { StrategyVersionManager, StrategyPromoter } from '../lifecycle';
-import { AccountState, MCLDecision, StrategyAllocation, StrategyName, StrategyVersion } from '../types';
+import { AccountState, MCLDecision, StrategyAllocation, StrategyName, StrategyVersion, RiskControlAgentOutput, RiskParameters } from '../types';
 
 export class MCLOrchestrator {
   private systemEvaluator: SystemEvaluator;
   private agentEvaluator: AgentEvaluator;
   private conflictArbitrator: ConflictArbitrator;
+  private riskControlAgent: RiskControlAgent;
   private decisionEngine: DecisionEngine;
   private versionManager: StrategyVersionManager;
   private strategyPromoter: StrategyPromoter;
@@ -22,6 +24,7 @@ export class MCLOrchestrator {
   private positionTracker: PositionTracker;
   private signalAggregator: SignalAggregator;
   private orderManager: OrderManager;
+  private lastRiskControlOutput: RiskControlAgentOutput | null = null;
 
   constructor(
     apiKey: string,
@@ -40,6 +43,7 @@ export class MCLOrchestrator {
     this.systemEvaluator = new SystemEvaluator(apiKey, db);
     this.agentEvaluator = new AgentEvaluator(apiKey, db, positionTracker);
     this.conflictArbitrator = new ConflictArbitrator(apiKey, db, positionTracker);
+    this.riskControlAgent = new RiskControlAgent(apiKey, db, positionTracker);
     this.decisionEngine = new DecisionEngine();
     this.versionManager = new StrategyVersionManager(db);
     this.strategyPromoter = new StrategyPromoter(db);
@@ -64,7 +68,23 @@ export class MCLOrchestrator {
       console.log('[MCL] Running System Evaluator...');
       const systemEvaluation = await this.systemEvaluator.evaluate(accountState);
 
-      // 4. Run Agent Evaluator
+      // 4. Run Risk Control Agent (NEW - manages dynamic risk parameters)
+      console.log('[MCL] Running Risk Control Agent...');
+      const marketConditions = await this.agentEvaluator['getMarketConditions']();
+      const riskControlOutput = await this.riskControlAgent.evaluate(
+        accountState,
+        marketConditions,
+        systemEvaluation.risk_level
+      );
+      this.lastRiskControlOutput = riskControlOutput;
+
+      // Apply risk parameters to system
+      const updatedRiskParams = this.riskControlAgent.applyOutput(riskControlOutput);
+      console.log(`[MCL] Risk Control: Score=${riskControlOutput.current_risk_score}, ` +
+        `Stress=${riskControlOutput.market_stress_level}, ` +
+        `Actions=${riskControlOutput.immediate_actions.length}`);
+
+      // 5. Run Agent Evaluator
       console.log('[MCL] Running Agent Evaluator...');
       const agentEvaluation = await this.agentEvaluator.evaluate(
         accountState.equity,
@@ -72,7 +92,7 @@ export class MCLOrchestrator {
         systemEvaluation.risk_level
       );
 
-      // 5. Extract proposed allocations from agent evaluation (only for active strategies)
+      // 6. Extract proposed allocations from agent evaluation (only for active strategies)
       const proposedAllocations: StrategyAllocation = {
         funding_signal: activeStrategies.has('funding_signal')
           ? agentEvaluation.strategy_assessments.funding_signal.recommended_allocation
@@ -88,9 +108,9 @@ export class MCLOrchestrator {
           : 0,
       };
 
-      // 5. Run Conflict Arbitrator
+      // 7. Run Conflict Arbitrator (use dynamic leverage from Risk Control Agent)
       console.log('[MCL] Running Conflict Arbitrator...');
-      const maxLeverage = systemEvaluation.risk_level === 'MINIMUM' ? 3 : systemEvaluation.risk_level === 'REDUCED' ? 5 : 10;
+      const maxLeverage = this.getMaxLeverageFromRiskControl(systemEvaluation.risk_level, riskControlOutput);
       const conflictResolution = await this.conflictArbitrator.arbitrate(
         proposedAllocations,
         agentEvaluation.disable_strategies,
@@ -98,21 +118,25 @@ export class MCLOrchestrator {
         maxLeverage
       );
 
-      // 6. Run Decision Engine
+      // 8. Run Decision Engine (now includes risk control output)
       console.log('[MCL] Running Decision Engine...');
       const decision = this.decisionEngine.run({
         systemEvaluation,
         agentEvaluation,
         conflictResolution,
         currentState: accountState,
+        riskControlOutput, // Pass risk control output to decision engine
       });
 
-      // 7. Apply decision
+      // 9. Apply decision
       await this.applyDecision(decision);
 
-      // 8. Log decision
+      // 10. Execute immediate risk actions if any
+      await this.executeImmediateRiskActions(riskControlOutput.immediate_actions);
+
+      // 11. Log decision
       const latencyMs = Date.now() - startTime;
-      await this.logDecision(decision, systemEvaluation, agentEvaluation, conflictResolution, latencyMs);
+      await this.logDecision(decision, systemEvaluation, agentEvaluation, conflictResolution, latencyMs, riskControlOutput);
 
       console.log(`[MCL] Cycle complete in ${latencyMs}ms`);
       console.log(`[MCL] Final allocations: ${JSON.stringify(decision.finalAllocations)}`);
@@ -121,6 +145,48 @@ export class MCLOrchestrator {
     } catch (error) {
       console.error('[MCL] Error in evaluation cycle:', error);
       return null;
+    }
+  }
+
+  private getMaxLeverageFromRiskControl(
+    riskLevel: 'NORMAL' | 'REDUCED' | 'MINIMUM',
+    riskControlOutput: RiskControlAgentOutput
+  ): number {
+    switch (riskLevel) {
+      case 'MINIMUM':
+        return riskControlOutput.leverage_caps.minimum;
+      case 'REDUCED':
+        return riskControlOutput.leverage_caps.reduced;
+      default:
+        return riskControlOutput.leverage_caps.normal;
+    }
+  }
+
+  private async executeImmediateRiskActions(
+    actions: RiskControlAgentOutput['immediate_actions']
+  ): Promise<void> {
+    for (const action of actions) {
+      console.log(`[MCL] Executing risk action: ${action.action_type} - ${action.reason}`);
+
+      switch (action.action_type) {
+        case 'CLOSE_POSITION':
+          if (action.target) {
+            await this.orderManager.closePosition(action.target, `Risk Control: ${action.reason}`);
+          }
+          break;
+        case 'PAUSE_STRATEGY':
+          if (action.target) {
+            this.signalAggregator.disableStrategy(action.target as StrategyName);
+          }
+          break;
+        case 'REDUCE_LEVERAGE':
+        case 'TIGHTEN_STOPS':
+        case 'REDUCE_POSITION_SIZE':
+          // These are handled by the updated risk parameters
+          // Log for tracking purposes
+          console.log(`[MCL] Risk action applied via parameters: ${action.action_type}`);
+          break;
+      }
     }
   }
 
@@ -190,7 +256,8 @@ export class MCLOrchestrator {
     systemEval: { overall_health: string; risk_level: string; confidence: number },
     agentEval: { confidence: number; allocation_rationale: string },
     conflictRes: { confidence: number },
-    latencyMs: number
+    latencyMs: number,
+    riskControlOutput?: RiskControlAgentOutput
   ): Promise<void> {
     const mclDecision: MCLDecision & { llmModel?: string; tokensUsed?: number; latencyMs?: number } = {
       decisionTime: new Date(),
@@ -294,10 +361,28 @@ export class MCLOrchestrator {
     console.log(`[MCL] Manually rolled back ${strategyName} v${version.version}: ${reason}`);
     return true;
   }
+
+  // Risk Control Agent accessors
+  getCurrentRiskParameters(): RiskParameters {
+    return this.riskControlAgent.getCurrentParameters();
+  }
+
+  getLastRiskControlOutput(): RiskControlAgentOutput | null {
+    return this.lastRiskControlOutput;
+  }
+
+  getRiskControlAgent(): RiskControlAgent {
+    return this.riskControlAgent;
+  }
+
+  resetRiskParametersToDefaults(): RiskParameters {
+    return this.riskControlAgent.resetToDefaults();
+  }
 }
 
 export { SystemEvaluator } from './system-evaluator';
 export { AgentEvaluator } from './agent-evaluator';
 export { ConflictArbitrator } from './conflict-arbitrator';
+export { RiskControlAgent, DEFAULT_RISK_PARAMETERS } from './risk-control-agent';
 export { DecisionEngine } from './decision-engine';
 export { AnomalyDetector, checkForAnomalies } from './anomaly-detector';

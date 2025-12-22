@@ -4,6 +4,7 @@ import {
   SystemEvaluatorOutput,
   AgentEvaluatorOutput,
   ConflictArbitratorOutput,
+  RiskControlAgentOutput,
   AccountState,
 } from '../types';
 
@@ -12,6 +13,7 @@ export interface MCLDecisionEngineInput {
   agentEvaluation: AgentEvaluatorOutput;
   conflictResolution: ConflictArbitratorOutput;
   currentState: AccountState;
+  riskControlOutput?: RiskControlAgentOutput;
 }
 
 export interface MCLDecisionEngineOutput {
@@ -24,11 +26,17 @@ export interface MCLDecisionEngineOutput {
   shouldPause: boolean;
   pauseReason?: string;
   reasoning: string;
+  // Risk control outputs
+  riskScore?: number;
+  riskTrend?: 'INCREASING' | 'STABLE' | 'DECREASING';
+  marketStressLevel?: 'LOW' | 'MODERATE' | 'HIGH' | 'EXTREME';
+  positionSizeScalar?: number;
+  maxTotalExposure?: number;
 }
 
 export class DecisionEngine {
   run(input: MCLDecisionEngineInput): MCLDecisionEngineOutput {
-    const { systemEvaluation, agentEvaluation, conflictResolution, currentState } = input;
+    const { systemEvaluation, agentEvaluation, conflictResolution, currentState, riskControlOutput } = input;
 
     // HARD CONSTRAINTS (override MCL)
 
@@ -107,7 +115,7 @@ export class DecisionEngine {
       conflictResolution.position_actions?.filter((p) => p.action === 'CLOSE').map((p) => p.symbol) || [];
 
     // Build reasoning summary
-    const reasoning = this.buildReasoningSummary(systemEvaluation, agentEvaluation, conflictResolution);
+    const reasoning = this.buildReasoningSummary(systemEvaluation, agentEvaluation, conflictResolution, riskControlOutput);
 
     return {
       finalAllocations: allocations,
@@ -118,13 +126,20 @@ export class DecisionEngine {
       riskLevel,
       shouldPause: false,
       reasoning,
+      // Risk control outputs (from Risk Control Agent)
+      riskScore: riskControlOutput?.current_risk_score,
+      riskTrend: riskControlOutput?.risk_trend,
+      marketStressLevel: riskControlOutput?.market_stress_level,
+      positionSizeScalar: riskControlOutput?.volatility_adjustments.position_size_scalar,
+      maxTotalExposure: riskControlOutput?.exposure_limits.max_total_exposure,
     };
   }
 
   private buildReasoningSummary(
     systemEval: SystemEvaluatorOutput,
     agentEval: AgentEvaluatorOutput,
-    conflictRes: ConflictArbitratorOutput
+    conflictRes: ConflictArbitratorOutput,
+    riskControl?: RiskControlAgentOutput
   ): string {
     const parts: string[] = [];
 
@@ -141,8 +156,18 @@ export class DecisionEngine {
       parts.push(`Adjustments: ${conflictRes.adjustments_made.join(', ')}`);
     }
 
-    const avgConfidence =
-      (systemEval.confidence + agentEval.confidence + conflictRes.confidence) / 3;
+    // Add risk control summary
+    if (riskControl) {
+      parts.push(`Risk Score: ${riskControl.current_risk_score}/100 (${riskControl.risk_trend})`);
+      parts.push(`Market Stress: ${riskControl.market_stress_level}`);
+      if (riskControl.immediate_actions.length > 0) {
+        parts.push(`Risk Actions: ${riskControl.immediate_actions.length}`);
+      }
+    }
+
+    const confidences = [systemEval.confidence, agentEval.confidence, conflictRes.confidence];
+    if (riskControl) confidences.push(riskControl.confidence);
+    const avgConfidence = confidences.reduce((a, b) => a + b, 0) / confidences.length;
     parts.push(`Avg Confidence: ${avgConfidence.toFixed(2)}`);
 
     return parts.join(' | ');

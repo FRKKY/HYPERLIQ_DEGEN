@@ -1,26 +1,56 @@
 import { Database } from '../data/database';
 import { PositionTracker } from './position-tracker';
-import { Signal, RiskCheckResult, Alert } from '../types';
+import { Signal, RiskCheckResult, Alert, RiskParameters } from '../types';
+
+// Default risk parameters (from manifesto spec)
+const DEFAULT_RISK_PARAMS: RiskParameters = {
+  drawdownWarning: -10,
+  drawdownCritical: -15,
+  drawdownPause: -20,
+  dailyLossPause: -15,
+  singleTradeLossAlert: -8,
+  maxLeverageNormal: 10,
+  maxLeverageReduced: 5,
+  maxLeverageMinimum: 3,
+  maxTotalExposure: 0.8,
+  maxSinglePosition: 0.25,
+  maxCorrelatedExposure: 0.5,
+  positionSizeScalar: 1.0,
+  updatedAt: new Date(),
+  updatedBy: 'DEFAULT',
+};
 
 export class RiskManager {
   private db: Database;
   private positionTracker: PositionTracker;
-
-  // Thresholds from spec
-  private readonly DRAWDOWN_WARNING = -10;
-  private readonly DRAWDOWN_CRITICAL = -15;
-  private readonly DRAWDOWN_PAUSE = -20;
-  private readonly DAILY_LOSS_PAUSE = -15;
-  private readonly SINGLE_TRADE_LOSS_ALERT = -8;
-  private readonly MAX_EXPOSURE_RATIO = 0.8;
+  private riskParams: RiskParameters;
 
   constructor(db: Database, positionTracker: PositionTracker) {
     this.db = db;
     this.positionTracker = positionTracker;
+    this.riskParams = { ...DEFAULT_RISK_PARAMS };
+  }
+
+  // Update risk parameters from MCL Risk Control Agent
+  updateRiskParameters(params: RiskParameters): void {
+    this.riskParams = { ...params };
+    console.log(`[RiskManager] Risk parameters updated by ${params.updatedBy} at ${params.updatedAt.toISOString()}`);
+    console.log(`[RiskManager] Drawdown thresholds: Warning=${params.drawdownWarning}%, Critical=${params.drawdownCritical}%, Pause=${params.drawdownPause}%`);
+    console.log(`[RiskManager] Leverage caps: Normal=${params.maxLeverageNormal}x, Reduced=${params.maxLeverageReduced}x, Minimum=${params.maxLeverageMinimum}x`);
+  }
+
+  getCurrentRiskParameters(): RiskParameters {
+    return { ...this.riskParams };
+  }
+
+  resetToDefaults(): void {
+    this.riskParams = { ...DEFAULT_RISK_PARAMS };
+    console.log('[RiskManager] Risk parameters reset to defaults');
   }
 
   async checkPreTrade(signal: Signal, allocation: number, equity: number): Promise<RiskCheckResult> {
     const checks: string[] = [];
+    const params = this.riskParams;
 
     // Guard against invalid equity values
     if (isNaN(equity) || equity <= 0) {
@@ -47,17 +77,17 @@ export class RiskManager {
       }
     }
 
-    // 2. Check drawdown
+    // 2. Check drawdown (using dynamic MCL parameters)
     const drawdown = ((equity - systemState.peakEquity) / systemState.peakEquity) * 100;
-    if (drawdown <= this.DRAWDOWN_PAUSE) {
-      await this.triggerPause('DRAWDOWN', `Drawdown ${drawdown.toFixed(2)}% exceeded -20% threshold`);
+    if (drawdown <= params.drawdownPause) {
+      await this.triggerPause('DRAWDOWN', `Drawdown ${drawdown.toFixed(2)}% exceeded ${params.drawdownPause}% threshold`);
       return { approved: false, reason: 'Drawdown pause triggered', maxLeverage: 0 };
     }
 
-    // 3. Check daily loss
+    // 3. Check daily loss (using dynamic MCL parameters)
     const dailyPnlPct = ((equity - systemState.dailyStartEquity) / systemState.dailyStartEquity) * 100;
-    if (dailyPnlPct <= this.DAILY_LOSS_PAUSE) {
-      await this.triggerPause('DAILY_LOSS', `Daily loss ${dailyPnlPct.toFixed(2)}% exceeded -15% threshold`);
+    if (dailyPnlPct <= params.dailyLossPause) {
+      await this.triggerPause('DAILY_LOSS', `Daily loss ${dailyPnlPct.toFixed(2)}% exceeded ${params.dailyLossPause}% threshold`);
       return { approved: false, reason: 'Daily loss pause triggered', maxLeverage: 0 };
     }
 
@@ -73,22 +103,33 @@ export class RiskManager {
       }
     }
 
-    // 5. Calculate max leverage based on risk level
-    let maxLeverage = 10; // Default
-    if (drawdown <= this.DRAWDOWN_CRITICAL) {
-      maxLeverage = 3;
-      checks.push('Leverage capped to 3x due to critical drawdown');
-    } else if (drawdown <= this.DRAWDOWN_WARNING) {
-      maxLeverage = 5;
-      checks.push('Leverage capped to 5x due to drawdown warning');
+    // 5. Calculate max leverage based on risk level (using dynamic MCL parameters)
+    let maxLeverage = params.maxLeverageNormal;
+    if (drawdown <= params.drawdownCritical) {
+      maxLeverage = params.maxLeverageMinimum;
+      checks.push(`Leverage capped to ${params.maxLeverageMinimum}x due to critical drawdown`);
+    } else if (drawdown <= params.drawdownWarning) {
+      maxLeverage = params.maxLeverageReduced;
+      checks.push(`Leverage capped to ${params.maxLeverageReduced}x due to drawdown warning`);
     }
 
-    // 6. Check total exposure wouldn't exceed safe limits
+    // 6. Check total exposure wouldn't exceed safe limits (using dynamic MCL parameters)
     const currentMargin = this.positionTracker.getTotalMarginUsed();
     const newPositionMargin = equity * (allocation / 100) * 0.5; // Rough estimate
-    if (currentMargin + newPositionMargin > equity * this.MAX_EXPOSURE_RATIO) {
-      maxLeverage = Math.min(maxLeverage, 3);
-      checks.push('Leverage reduced due to high total exposure');
+    if (currentMargin + newPositionMargin > equity * params.maxTotalExposure) {
+      maxLeverage = Math.min(maxLeverage, params.maxLeverageMinimum);
+      checks.push(`Leverage reduced due to high total exposure (>${(params.maxTotalExposure * 100).toFixed(0)}%)`);
+    }
+
+    // 7. Check single position size limit (using dynamic MCL parameters)
+    const positionSizeRatio = (allocation / 100);
+    if (positionSizeRatio > params.maxSinglePosition) {
+      checks.push(`Position size reduced to ${(params.maxSinglePosition * 100).toFixed(0)}% max`);
+    }
+
+    // 8. Apply position size scalar from MCL
+    if (params.positionSizeScalar !== 1.0) {
+      checks.push(`Position size scaled by ${params.positionSizeScalar.toFixed(2)}x (volatility adjustment)`);
     }
 
     return {
@@ -98,11 +139,23 @@ export class RiskManager {
     };
   }
 
+  // Get position size scalar from MCL (for use by order manager)
+  getPositionSizeScalar(): number {
+    return this.riskParams.positionSizeScalar;
+  }
+
+  // Get max single position size from MCL
+  getMaxSinglePositionSize(): number {
+    return this.riskParams.maxSinglePosition;
+  }
+
   async runContinuousChecks(equity: number): Promise<{
     shouldPause: boolean;
     alerts: Alert[];
     riskLevel: 'NORMAL' | 'REDUCED' | 'MINIMUM';
   }> {
+    const params = this.riskParams;
+
     // Guard against invalid equity values
     if (isNaN(equity) || equity <= 0) {
       console.log('[RiskManager] Skipping risk check - invalid equity value:', equity);
@@ -134,8 +187,8 @@ export class RiskManager {
     const drawdown = ((equity - systemState.peakEquity) / systemState.peakEquity) * 100;
     const dailyPnlPct = ((equity - systemState.dailyStartEquity) / systemState.dailyStartEquity) * 100;
 
-    // Check thresholds
-    if (drawdown <= this.DRAWDOWN_PAUSE) {
+    // Check thresholds (using dynamic MCL parameters)
+    if (drawdown <= params.drawdownPause) {
       shouldPause = true;
       riskLevel = 'MINIMUM';
       alerts.push({
@@ -143,33 +196,33 @@ export class RiskManager {
         alertType: 'DRAWDOWN_PAUSE',
         severity: 'PAUSE',
         title: 'TRADING PAUSED - Drawdown Limit',
-        message: `Drawdown at ${drawdown.toFixed(2)}% exceeded -20% threshold. All positions will be closed.`,
+        message: `Drawdown at ${drawdown.toFixed(2)}% exceeded ${params.drawdownPause}% threshold. All positions will be closed.`,
         requiresAction: true,
       });
-      await this.triggerPause('DRAWDOWN', `Drawdown ${drawdown.toFixed(2)}% exceeded -20%`);
-    } else if (drawdown <= this.DRAWDOWN_CRITICAL) {
+      await this.triggerPause('DRAWDOWN', `Drawdown ${drawdown.toFixed(2)}% exceeded ${params.drawdownPause}%`);
+    } else if (drawdown <= params.drawdownCritical) {
       riskLevel = 'MINIMUM';
       alerts.push({
         alertTime: new Date(),
         alertType: 'DRAWDOWN_CRITICAL',
         severity: 'CRITICAL',
         title: 'Critical Drawdown Warning',
-        message: `Drawdown at ${drawdown.toFixed(2)}%. System at minimum exposure.`,
+        message: `Drawdown at ${drawdown.toFixed(2)}%. System at minimum exposure (threshold: ${params.drawdownCritical}%).`,
         requiresAction: false,
       });
-    } else if (drawdown <= this.DRAWDOWN_WARNING) {
+    } else if (drawdown <= params.drawdownWarning) {
       riskLevel = 'REDUCED';
       alerts.push({
         alertTime: new Date(),
         alertType: 'DRAWDOWN_WARNING',
         severity: 'WARNING',
         title: 'Drawdown Warning',
-        message: `Drawdown at ${drawdown.toFixed(2)}%. Exposure reduced.`,
+        message: `Drawdown at ${drawdown.toFixed(2)}%. Exposure reduced (threshold: ${params.drawdownWarning}%).`,
         requiresAction: false,
       });
     }
 
-    if (dailyPnlPct <= this.DAILY_LOSS_PAUSE) {
+    if (dailyPnlPct <= params.dailyLossPause) {
       shouldPause = true;
       riskLevel = 'MINIMUM';
       alerts.push({
@@ -177,23 +230,23 @@ export class RiskManager {
         alertType: 'DAILY_LOSS_PAUSE',
         severity: 'PAUSE',
         title: 'TRADING PAUSED - Daily Loss Limit',
-        message: `Daily loss ${dailyPnlPct.toFixed(2)}% exceeded -15% threshold.`,
+        message: `Daily loss ${dailyPnlPct.toFixed(2)}% exceeded ${params.dailyLossPause}% threshold.`,
         requiresAction: true,
       });
-      await this.triggerPause('DAILY_LOSS', `Daily loss ${dailyPnlPct.toFixed(2)}% exceeded -15%`);
+      await this.triggerPause('DAILY_LOSS', `Daily loss ${dailyPnlPct.toFixed(2)}% exceeded ${params.dailyLossPause}%`);
     }
 
-    // Check individual position losses
+    // Check individual position losses (using dynamic MCL parameters)
     const positions = this.positionTracker.getAllPositions();
     for (const pos of positions) {
       const positionPnlPct = (pos.unrealizedPnl / pos.marginUsed) * 100;
-      if (positionPnlPct <= this.SINGLE_TRADE_LOSS_ALERT) {
+      if (positionPnlPct <= params.singleTradeLossAlert) {
         alerts.push({
           alertTime: new Date(),
           alertType: 'SINGLE_TRADE_LOSS',
           severity: 'WARNING',
           title: 'Large Position Loss',
-          message: `${pos.symbol} ${pos.side} position at ${positionPnlPct.toFixed(2)}% loss.`,
+          message: `${pos.symbol} ${pos.side} position at ${positionPnlPct.toFixed(2)}% loss (alert threshold: ${params.singleTradeLossAlert}%).`,
           requiresAction: false,
         });
       }

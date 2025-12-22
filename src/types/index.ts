@@ -477,6 +477,74 @@ export interface ConflictArbitratorOutput {
   confidence: number;
 }
 
+// Risk Control Agent Output (MCL-managed dynamic risk parameters)
+export interface RiskControlAgentOutput {
+  // Dynamic risk thresholds
+  risk_thresholds: {
+    drawdown_warning: number;       // Default: -10
+    drawdown_critical: number;      // Default: -15
+    drawdown_pause: number;         // Default: -20
+    daily_loss_pause: number;       // Default: -15
+    single_trade_loss_alert: number; // Default: -8
+  };
+
+  // Dynamic leverage caps per risk level
+  leverage_caps: {
+    normal: number;    // Default: 10
+    reduced: number;   // Default: 5
+    minimum: number;   // Default: 3
+  };
+
+  // Dynamic exposure limits
+  exposure_limits: {
+    max_total_exposure: number;     // Default: 0.8 (80%)
+    max_single_position: number;    // Default: 0.25 (25%)
+    max_correlated_exposure: number; // Default: 0.5 (50%)
+  };
+
+  // Volatility-adjusted parameters
+  volatility_adjustments: {
+    position_size_scalar: number;   // 0.5-1.5, scales position sizes
+    hold_time_reduction: boolean;   // Reduce max hold times in high vol
+    tighten_stops: boolean;         // Use tighter stop losses
+  };
+
+  // Immediate risk actions
+  immediate_actions: Array<{
+    action_type: 'REDUCE_LEVERAGE' | 'TIGHTEN_STOPS' | 'REDUCE_POSITION_SIZE' | 'PAUSE_STRATEGY' | 'CLOSE_POSITION';
+    target?: string;  // Symbol or strategy name
+    value?: number;   // New value if applicable
+    reason: string;
+  }>;
+
+  // Risk assessment
+  current_risk_score: number;      // 0-100 (0=safe, 100=maximum risk)
+  risk_trend: 'INCREASING' | 'STABLE' | 'DECREASING';
+  market_stress_level: 'LOW' | 'MODERATE' | 'HIGH' | 'EXTREME';
+
+  // Reasoning and confidence
+  reasoning: string;
+  confidence: number;  // 0.0 to 1.0
+}
+
+// Risk parameters as stored/used by the system
+export interface RiskParameters {
+  drawdownWarning: number;
+  drawdownCritical: number;
+  drawdownPause: number;
+  dailyLossPause: number;
+  singleTradeLossAlert: number;
+  maxLeverageNormal: number;
+  maxLeverageReduced: number;
+  maxLeverageMinimum: number;
+  maxTotalExposure: number;
+  maxSinglePosition: number;
+  maxCorrelatedExposure: number;
+  positionSizeScalar: number;
+  updatedAt: Date;
+  updatedBy: 'MCL' | 'DEFAULT' | 'MANUAL';
+}
+
 // Backtest types
 export interface BacktestConfig {
   startDate: Date;
