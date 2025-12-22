@@ -1,5 +1,6 @@
 import { Database } from '../data/database';
 import { BaseStrategy } from '../strategies/base-strategy';
+import { StrategyValidator } from '../execution/strategy-validator';
 import { BacktestConfig, BacktestResult, Candle, Signal, StrategyAllocation, StrategyName } from '../types';
 
 interface BacktestPosition {
@@ -24,13 +25,70 @@ interface BacktestTrade {
   strategyName: StrategyName;
 }
 
+export interface BacktestValidationResult {
+  backtest: BacktestResult;
+  validation: {
+    passed: boolean;
+    errors: string[];
+  };
+}
+
 export class BacktestEngine {
   private db: Database;
   private config: BacktestConfig;
+  private validator: StrategyValidator;
 
   constructor(db: Database, config: BacktestConfig) {
     this.db = db;
     this.config = config;
+    this.validator = new StrategyValidator(db);
+  }
+
+  /**
+   * Run backtest AND validate results, updating trading permissions.
+   * This is the recommended method to ensure strategies are validated before trading.
+   */
+  async runAndValidate(strategy: BaseStrategy): Promise<BacktestValidationResult> {
+    console.log(`[Backtest] Running validation backtest for ${strategy.name}...`);
+
+    // Run backtest with 100% allocation to this strategy
+    const allocations: StrategyAllocation = {
+      funding_signal: 0,
+      momentum_breakout: 0,
+      mean_reversion: 0,
+      trend_follow: 0,
+    };
+    allocations[strategy.name] = 100;
+
+    const backtest = await this.run([strategy], allocations);
+
+    // Validate and update permissions
+    const validation = await this.validator.validateAndUpdatePermissions(
+      strategy.name,
+      backtest,
+      this.config.startDate,
+      this.config.endDate
+    );
+
+    return { backtest, validation };
+  }
+
+  /**
+   * Run validation backtests for all strategies and update permissions
+   */
+  async runAndValidateAll(strategies: BaseStrategy[]): Promise<Map<StrategyName, BacktestValidationResult>> {
+    const results = new Map<StrategyName, BacktestValidationResult>();
+
+    for (const strategy of strategies) {
+      const result = await this.runAndValidate(strategy);
+      results.set(strategy.name, result);
+    }
+
+    // Summary
+    const passed = [...results.values()].filter(r => r.validation.passed).length;
+    console.log(`\n[Backtest] Validation complete: ${passed}/${strategies.length} strategies passed`);
+
+    return results;
   }
 
   async run(strategies: BaseStrategy[], allocations: StrategyAllocation): Promise<BacktestResult> {

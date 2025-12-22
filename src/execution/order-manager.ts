@@ -2,6 +2,7 @@ import { HyperliquidRestClient } from '../hyperliquid';
 import { Database } from '../data/database';
 import { RiskManager } from './risk-manager';
 import { PositionTracker } from './position-tracker';
+import { StrategyValidator } from './strategy-validator';
 import { Signal, TradeResult, Trade, StrategyAllocation, Environment } from '../types';
 
 const STRATEGY_CONFIGS = {
@@ -16,6 +17,7 @@ export class OrderManager {
   private db: Database;
   private riskManager: RiskManager;
   private positionTracker: PositionTracker;
+  private validator: StrategyValidator;
 
   constructor(
     client: HyperliquidRestClient,
@@ -27,6 +29,7 @@ export class OrderManager {
     this.db = db;
     this.riskManager = riskManager;
     this.positionTracker = positionTracker;
+    this.validator = new StrategyValidator(db);
   }
 
   async executeSignal(
@@ -37,6 +40,26 @@ export class OrderManager {
     strategyVersionId?: number
   ): Promise<TradeResult> {
     try {
+      // 0. Backtest validation check - strategies must pass backtest before live trading
+      const validationMode = await this.validator.getValidationMode();
+
+      if (validationMode !== 'disabled') {
+        const isValidated = await this.validator.isStrategyValidated(signal.strategyName);
+
+        if (!isValidated) {
+          const status = await this.validator.getValidationStatus(signal.strategyName);
+          const errorMsg = `Strategy ${signal.strategyName} not validated for trading. ${status.validationErrors.join('; ')}`;
+
+          if (validationMode === 'strict') {
+            console.log(`[OrderManager] BLOCKED: ${errorMsg}`);
+            return { success: false, reason: errorMsg };
+          } else {
+            // warn mode - log but continue
+            console.warn(`[OrderManager] WARNING: ${errorMsg} (trading anyway in warn mode)`);
+          }
+        }
+      }
+
       // 1. Pre-trade risk checks
       const riskCheck = await this.riskManager.checkPreTrade(signal, allocation, equity);
       if (!riskCheck.approved) {
