@@ -127,6 +127,8 @@ export interface Position {
   marginUsed: number;
   strategyName: StrategyName;
   openedAt: Date;
+  stopLoss?: number;
+  takeProfit?: number;
 }
 
 export interface AccountState {

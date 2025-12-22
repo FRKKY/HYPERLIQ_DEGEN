@@ -285,23 +285,27 @@ export class SignalAggregator {
         if (!currentPrice) continue;
 
         // Check stop loss
-        if (position.side === 'LONG' && currentPrice <= (position as any).stopLoss) {
-          await this.orderManager.closePosition(position.symbol, 'Stop loss hit');
-          continue;
-        }
-        if (position.side === 'SHORT' && currentPrice >= (position as any).stopLoss) {
-          await this.orderManager.closePosition(position.symbol, 'Stop loss hit');
-          continue;
+        if (position.stopLoss !== undefined) {
+          if (position.side === 'LONG' && currentPrice <= position.stopLoss) {
+            await this.orderManager.closePosition(position.symbol, 'Stop loss hit');
+            continue;
+          }
+          if (position.side === 'SHORT' && currentPrice >= position.stopLoss) {
+            await this.orderManager.closePosition(position.symbol, 'Stop loss hit');
+            continue;
+          }
         }
 
         // Check take profit
-        if (position.side === 'LONG' && currentPrice >= (position as any).takeProfit) {
-          await this.orderManager.closePosition(position.symbol, 'Take profit hit');
-          continue;
-        }
-        if (position.side === 'SHORT' && currentPrice <= (position as any).takeProfit) {
-          await this.orderManager.closePosition(position.symbol, 'Take profit hit');
-          continue;
+        if (position.takeProfit !== undefined) {
+          if (position.side === 'LONG' && currentPrice >= position.takeProfit) {
+            await this.orderManager.closePosition(position.symbol, 'Take profit hit');
+            continue;
+          }
+          if (position.side === 'SHORT' && currentPrice <= position.takeProfit) {
+            await this.orderManager.closePosition(position.symbol, 'Take profit hit');
+            continue;
+          }
         }
 
         // Check strategy-specific exit conditions

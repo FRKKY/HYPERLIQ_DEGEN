@@ -14,6 +14,7 @@ import { MCLOrchestrator } from './mcl';
 import { AlertManager, TradingTelegramBot, DashboardServer } from './monitoring';
 import { StrategyPromoter } from './lifecycle';
 import { Position, PauseAnalysis, Environment } from './types';
+import { logger } from './utils';
 
 class TradingSystem {
   private db!: Database;
@@ -33,13 +34,13 @@ class TradingSystem {
   private environment!: Environment;
 
   async initialize(): Promise<void> {
-    console.log('[System] Initializing trading system...');
+    logger.info('System', 'Initializing trading system...');
 
     const config = loadConfig();
 
     // Determine environment
     this.environment = config.hyperliquid.useTestnet ? 'testnet' : 'mainnet';
-    console.log(`[System] Running in ${this.environment} mode`);
+    logger.info('System', `Running in ${this.environment} mode`);
 
     // Initialize database
     this.db = new Database(config.database.url);
@@ -47,10 +48,10 @@ class TradingSystem {
 
     // Initialize Hyperliquid clients
     this.auth = new HyperliquidAuth(config.hyperliquid.privateKey, config.hyperliquid.useTestnet);
-    console.log(`[System] Wallet address (derived from private key): ${this.auth.address}`);
-    console.log(`[System] Configured wallet address: ${config.hyperliquid.walletAddress}`);
+    logger.info('System', `Wallet address (derived from private key): ${this.auth.address}`);
+    logger.info('System', `Configured wallet address: ${config.hyperliquid.walletAddress}`);
     if (this.auth.address.toLowerCase() !== config.hyperliquid.walletAddress.toLowerCase()) {
-      console.warn('[System] WARNING: Derived address does not match configured HL_WALLET_ADDRESS!');
+      logger.warn('System', 'Derived address does not match configured HL_WALLET_ADDRESS!');
     }
     this.restClient = new HyperliquidRestClient(this.auth, config.hyperliquid.useTestnet);
     await this.restClient.initialize();
@@ -102,31 +103,31 @@ class TradingSystem {
       this.telegramBot = new TradingTelegramBot(config.telegram.botToken, config.telegram.chatId, this.db);
       this.telegramBot.setSystemController(this.createSystemController());
       this.alertManager.setTelegramBot(this.telegramBot);
-      console.log('[System] Telegram bot enabled');
+      logger.info('System', 'Telegram bot enabled');
     } else {
-      console.log('[System] Telegram bot disabled (no credentials)');
+      logger.info('System', 'Telegram bot disabled (no credentials)');
     }
 
     this.dashboardServer = new DashboardServer(config.app.port, this.db);
     this.dashboardServer.setSystemController(this.createSystemController());
 
-    console.log('[System] Initialization complete');
+    logger.info('System', 'Initialization complete');
   }
 
   private async initializeSystemState(configInitialCapital: number): Promise<void> {
     try {
       // Get actual account equity from Hyperliquid
-      console.log('[System] Fetching account state from Hyperliquid...');
+      logger.info('System', 'Fetching account state from Hyperliquid...');
       const accountState = await this.restClient.getAccountState();
-      console.log('[System] Account state received:', JSON.stringify(accountState.marginSummary));
+      logger.debug('System', 'Account state received', { marginSummary: accountState.marginSummary });
       const equity = parseFloat(accountState.marginSummary.accountValue);
 
       if (isNaN(equity) || equity <= 0) {
-        console.log(`[System] Warning: Could not get valid equity, using config value: $${configInitialCapital}`);
+        logger.warn('System', 'Could not get valid equity, using config value', { configInitialCapital });
         await this.db.updateSystemState('peak_equity', configInitialCapital);
         await this.db.updateSystemState('daily_start_equity', configInitialCapital);
       } else {
-        console.log(`[System] Account equity: $${equity.toFixed(2)}`);
+        logger.info('System', `Account equity: $${equity.toFixed(2)}`);
         await this.db.updateSystemState('peak_equity', equity);
         await this.db.updateSystemState('daily_start_equity', equity);
       }
@@ -136,7 +137,7 @@ class TradingSystem {
       await this.db.updateSystemState('system_status', 'RUNNING');
       await this.db.updateSystemState('pause_reason', null);
     } catch (error) {
-      console.log(`[System] Warning: Could not initialize equity, using config value: $${configInitialCapital}`);
+      logger.warn('System', 'Could not initialize equity, using config value', { configInitialCapital });
       await this.db.updateSystemState('peak_equity', configInitialCapital);
       await this.db.updateSystemState('daily_start_equity', configInitialCapital);
     }
@@ -161,13 +162,13 @@ class TradingSystem {
       },
       resumeTrading: async () => {
         await this.riskManager.resumeTrading();
-        console.log('[System] Trading resumed');
+        logger.info('System', 'Trading resumed');
       },
       stopTrading: async () => {
         await this.orderManager.closeAllPositions('Manual stop');
         await this.db.updateSystemState('trading_enabled', false);
         await this.db.updateSystemState('system_status', 'STOPPED');
-        console.log('[System] Trading stopped');
+        logger.info('System', 'Trading stopped');
       },
       generatePauseAnalysis: async (): Promise<PauseAnalysis> => {
         const systemState = await this.db.getSystemState();
@@ -183,7 +184,7 @@ class TradingSystem {
   }
 
   async start(): Promise<void> {
-    console.log('[System] Starting trading system...');
+    logger.info('System', 'Starting trading system...');
 
     const config = loadConfig();
 
@@ -234,7 +235,7 @@ class TradingSystem {
       requiresAction: false,
     });
 
-    console.log('[System] Trading system started');
+    logger.info('System', 'Trading system started');
   }
 
   private async runTradingCycle(): Promise<void> {
@@ -250,13 +251,13 @@ class TradingSystem {
         const accountState = await this.restClient.getAccountState();
         equity = parseFloat(accountState.marginSummary.accountValue);
       } catch (error) {
-        console.log('[System] Skipping trading cycle - could not get account state');
+        logger.debug('System', 'Skipping trading cycle - could not get account state');
         return;
       }
 
       // Validate equity before proceeding
       if (isNaN(equity) || equity <= 0) {
-        console.log('[System] Skipping trading cycle - invalid equity:', equity);
+        logger.debug('System', 'Skipping trading cycle - invalid equity', { equity });
         return;
       }
 
@@ -279,7 +280,7 @@ class TradingSystem {
       // Run signal aggregator
       await this.signalAggregator.runCycle(symbols, allocations, equity);
     } catch (error) {
-      console.error('[System] Error in trading cycle:', error);
+      logger.error('System', 'Error in trading cycle', { error: error instanceof Error ? error.message : 'Unknown' });
     }
   }
 
@@ -290,7 +291,7 @@ class TradingSystem {
         return;
       }
 
-      console.log('[System] Running MCL evaluation...');
+      logger.info('System', 'Running MCL evaluation...');
       const decision = await this.mclOrchestrator.runCycle();
 
       if (decision) {
@@ -303,7 +304,7 @@ class TradingSystem {
         this.dashboardServer.broadcastUpdate('mclDecision', decision);
       }
     } catch (error) {
-      console.error('[System] Error in MCL cycle:', error);
+      logger.error('System', 'Error in MCL cycle', { error: error instanceof Error ? error.message : 'Unknown' });
     }
   }
 
@@ -342,13 +343,13 @@ class TradingSystem {
         drawdownPct,
       });
     } catch (error) {
-      console.error('[System] Error taking account snapshot:', error);
+      logger.error('System', 'Error taking account snapshot', { error: error instanceof Error ? error.message : 'Unknown' });
     }
   }
 
   private async generateDailyReport(): Promise<void> {
     try {
-      console.log('[System] Generating daily report...');
+      logger.info('System', 'Generating daily report...');
 
       const systemState = await this.db.getSystemState();
       const accountState = await this.restClient.getAccountState();
@@ -382,14 +383,14 @@ class TradingSystem {
       if (this.telegramBot) {
         await this.telegramBot.sendDailyReport(report);
       }
-      console.log('[System] Daily report sent');
+      logger.info('System', 'Daily report sent');
     } catch (error) {
-      console.error('[System] Error generating daily report:', error);
+      logger.error('System', 'Error generating daily report', { error: error instanceof Error ? error.message : 'Unknown' });
     }
   }
 
   async stop(): Promise<void> {
-    console.log('[System] Stopping trading system...');
+    logger.info('System', 'Stopping trading system...');
 
     this.dataCollector.stop();
     if (this.telegramBot) {
@@ -398,7 +399,7 @@ class TradingSystem {
     this.dashboardServer.stop();
     await this.db.disconnect();
 
-    console.log('[System] Trading system stopped');
+    logger.info('System', 'Trading system stopped');
   }
 }
 
@@ -415,8 +416,8 @@ async function runMigrations(): Promise<void> {
 
   // Log connection attempt (mask password)
   const maskedUrl = databaseUrl.replace(/:[^:@]+@/, ':***@');
-  console.log(`[Migrations] Connecting to: ${maskedUrl}`);
-  console.log(`[Migrations] NODE_ENV: ${process.env.NODE_ENV}`);
+  logger.info('Migrations', `Connecting to: ${maskedUrl}`);
+  logger.debug('Migrations', `NODE_ENV: ${process.env.NODE_ENV}`);
 
   const pool = new Pool({
     connectionString: databaseUrl,
@@ -424,7 +425,7 @@ async function runMigrations(): Promise<void> {
     connectionTimeoutMillis: 10000, // 10 second timeout
   });
 
-  console.log('[Migrations] Pool created, attempting connection...');
+  logger.debug('Migrations', 'Pool created, attempting connection...');
 
   try {
     await pool.query(`
@@ -441,15 +442,15 @@ async function runMigrations(): Promise<void> {
     const migrationsDir = join(__dirname, '..', 'migrations');
     const files = readdirSync(migrationsDir).filter(f => f.endsWith('.sql')).sort();
 
-    console.log(`[Migrations] Found ${files.length} migration files`);
+    logger.info('Migrations', `Found ${files.length} migration files`);
 
     for (const file of files) {
       if (executed.has(file)) {
-        console.log(`[Migrations] Skipping ${file} (already executed)`);
+        logger.debug('Migrations', `Skipping ${file} (already executed)`);
         continue;
       }
 
-      console.log(`[Migrations] Running: ${file}`);
+      logger.info('Migrations', `Running: ${file}`);
       const sql = readFileSync(join(migrationsDir, file), 'utf-8');
 
       await pool.query('BEGIN');
@@ -457,14 +458,14 @@ async function runMigrations(): Promise<void> {
         await pool.query(sql);
         await pool.query('INSERT INTO schema_migrations (filename) VALUES ($1)', [file]);
         await pool.query('COMMIT');
-        console.log(`[Migrations] Completed: ${file}`);
+        logger.info('Migrations', `Completed: ${file}`);
       } catch (error) {
         await pool.query('ROLLBACK');
         throw error;
       }
     }
 
-    console.log('[Migrations] All migrations completed');
+    logger.info('Migrations', 'All migrations completed');
   } finally {
     await pool.end();
   }
@@ -472,13 +473,13 @@ async function runMigrations(): Promise<void> {
 
 // Main entry point
 async function main() {
-  console.log('[System] Starting...');
+  logger.info('System', 'Starting...');
 
   // Run migrations first
   try {
     await runMigrations();
   } catch (error) {
-    console.error('[System] Migration failed:', error);
+    logger.error('System', 'Migration failed', { error: error instanceof Error ? error.message : 'Unknown' });
     process.exit(1);
   }
 
@@ -486,13 +487,13 @@ async function main() {
 
   // Handle graceful shutdown
   process.on('SIGINT', async () => {
-    console.log('\n[System] Received SIGINT, shutting down...');
+    logger.info('System', 'Received SIGINT, shutting down...');
     await system.stop();
     process.exit(0);
   });
 
   process.on('SIGTERM', async () => {
-    console.log('\n[System] Received SIGTERM, shutting down...');
+    logger.info('System', 'Received SIGTERM, shutting down...');
     await system.stop();
     process.exit(0);
   });
@@ -501,7 +502,7 @@ async function main() {
     await system.initialize();
     await system.start();
   } catch (error) {
-    console.error('[System] Fatal error:', error);
+    logger.error('System', 'Fatal error', { error: error instanceof Error ? error.message : 'Unknown' });
     process.exit(1);
   }
 }
