@@ -55,6 +55,8 @@ export interface ExtractionProgress {
     candlesCollected: number;
     fundingRatesCollected: number;
     openInterestSnapshots: number;
+    userFillsCollected: number;
+    historicalOrdersCollected: number;
     symbolsProcessed: number;
     totalSymbols: number;
     errors: number;
@@ -75,7 +77,7 @@ const DEFAULT_CONFIG: ExtractionConfig = {
   apiConcurrency: 5,
   fundingHistoryMonths: 12,
   incrementalMode: true,
-  useS3: false,  // S3 requires LZ4 decompression, disabled by default
+  useS3: true,  // S3 enabled by default for deep historical data
 };
 
 export class OptimalExtractor {
@@ -123,6 +125,8 @@ export class OptimalExtractor {
         candlesCollected: 0,
         fundingRatesCollected: 0,
         openInterestSnapshots: 0,
+        userFillsCollected: 0,
+        historicalOrdersCollected: 0,
         symbolsProcessed: 0,
         totalSymbols: 0,
         errors: 0,
@@ -178,7 +182,12 @@ export class OptimalExtractor {
         await this.runApiPhase(targetSymbols);
       }
 
-      // Phase 3: Capture current open interest
+      // Phase 3: Fetch user account data (fills, orders)
+      if (!this.abortRequested) {
+        await this.fetchUserData();
+      }
+
+      // Phase 4: Capture current open interest
       if (!this.abortRequested) {
         await this.captureOpenInterest(targetSymbols);
       }
@@ -292,6 +301,113 @@ export class OptimalExtractor {
   }
 
   /**
+   * Fetch user account data (fills, orders)
+   */
+  private async fetchUserData(): Promise<void> {
+    this.progress.currentPhase = {
+      name: 'User Data',
+      progress: 0,
+      details: 'Fetching user fills history...',
+    };
+
+    // Fetch user fills (up to 10,000 with pagination)
+    try {
+      let totalFills = 0;
+      let startTime = Date.now() - (180 * 24 * 60 * 60 * 1000); // 6 months ago
+
+      while (true) {
+        const fills = await this.client.getUserFillsByTime(startTime, Date.now(), true);
+
+        if (fills.length === 0) break;
+
+        for (const fill of fills) {
+          try {
+            await this.db.query(
+              `INSERT INTO trades (trade_id, strategy_name, symbol, side, direction, quantity, price, fee, executed_at, order_type, metadata)
+               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+               ON CONFLICT (trade_id) DO NOTHING`,
+              [
+                `fill-${fill.oid}-${fill.time}`,
+                'historical',
+                fill.coin,
+                fill.side === 'B' ? 'BUY' : 'SELL',
+                fill.side === 'B' ? 'BUY' : 'SELL',
+                parseFloat(fill.sz),
+                parseFloat(fill.px),
+                parseFloat(fill.fee || '0'),
+                new Date(fill.time),
+                'MARKET',
+                JSON.stringify({ historical: true, oid: fill.oid, closedPnl: fill.closedPnl }),
+              ]
+            );
+            totalFills++;
+          } catch {
+            // Skip duplicate fills
+          }
+        }
+
+        if (fills.length < 2000) break;
+        startTime = Math.max(...fills.map((f) => f.time)) + 1;
+
+        await this.sleep(100);
+      }
+
+      this.progress.stats.userFillsCollected = totalFills;
+      logger.info('OptimalExtractor', 'User fills collected', { count: totalFills });
+    } catch (error) {
+      logger.error('OptimalExtractor', 'Failed to fetch user fills', {
+        error: error instanceof Error ? error.message : 'Unknown',
+      });
+      this.progress.stats.errors++;
+    }
+
+    // Fetch historical orders (up to 2,000)
+    this.progress.currentPhase.details = 'Fetching historical orders...';
+    this.progress.currentPhase.progress = 50;
+
+    try {
+      const orders = await this.client.getHistoricalOrders();
+      let count = 0;
+
+      for (const order of orders) {
+        try {
+          await this.db.query(
+            `INSERT INTO signals (strategy_name, symbol, signal_time, direction, strength, entry_price, metadata)
+             VALUES ($1, $2, $3, $4, $5, $6, $7)
+             ON CONFLICT DO NOTHING`,
+            [
+              'historical_order',
+              order.coin,
+              new Date(order.timestamp),
+              order.side === 'B' ? 'LONG' : 'SHORT',
+              1.0,
+              parseFloat(order.limitPx),
+              JSON.stringify({ oid: order.oid, sz: order.sz, historical: true }),
+            ]
+          );
+          count++;
+        } catch {
+          // Skip duplicates
+        }
+      }
+
+      this.progress.stats.historicalOrdersCollected = count;
+      logger.info('OptimalExtractor', 'Historical orders collected', { count });
+    } catch (error) {
+      logger.error('OptimalExtractor', 'Failed to fetch historical orders', {
+        error: error instanceof Error ? error.message : 'Unknown',
+      });
+      this.progress.stats.errors++;
+    }
+
+    this.progress.currentPhase.progress = 100;
+  }
+
+  private sleep(ms: number): Promise<void> {
+    return new Promise((resolve) => setTimeout(resolve, ms));
+  }
+
+  /**
    * Capture current open interest snapshot
    */
   private async captureOpenInterest(symbols: string[]): Promise<void> {
@@ -362,7 +478,11 @@ export class OptimalExtractor {
 
   private reportFinalStats(): void {
     const elapsed = this.progress.timing.elapsedSeconds;
-    const rate = (this.progress.stats.candlesCollected + this.progress.stats.fundingRatesCollected) / elapsed;
+    const totalRecords = this.progress.stats.candlesCollected +
+      this.progress.stats.fundingRatesCollected +
+      this.progress.stats.userFillsCollected +
+      this.progress.stats.historicalOrdersCollected;
+    const rate = elapsed > 0 ? totalRecords / elapsed : 0;
 
     console.log('\n' + '='.repeat(70));
     console.log('EXTRACTION COMPLETE');
@@ -373,6 +493,8 @@ export class OptimalExtractor {
     console.log(`Symbols processed: ${this.progress.stats.symbolsProcessed}/${this.progress.stats.totalSymbols}`);
     console.log(`Candles collected: ${this.progress.stats.candlesCollected.toLocaleString()}`);
     console.log(`Funding rates collected: ${this.progress.stats.fundingRatesCollected.toLocaleString()}`);
+    console.log(`User fills collected: ${this.progress.stats.userFillsCollected.toLocaleString()}`);
+    console.log(`Historical orders collected: ${this.progress.stats.historicalOrdersCollected.toLocaleString()}`);
     console.log(`Open interest snapshots: ${this.progress.stats.openInterestSnapshots}`);
     console.log(`Errors: ${this.progress.stats.errors}`);
     console.log('='.repeat(70) + '\n');
