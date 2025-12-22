@@ -10,12 +10,38 @@
 
 import axios from 'axios';
 import * as zlib from 'zlib';
+import * as lz4 from 'lz4';
 import { promisify } from 'util';
 import { Database } from './database';
 import { Candle, Timeframe } from '../types';
 import { logger } from '../utils';
 
 const gunzip = promisify(zlib.gunzip);
+
+/**
+ * Decompress LZ4 block data
+ * Hyperliquid S3 uses LZ4 block format, not frame format
+ */
+function decompressLz4(compressed: Buffer): Buffer {
+  // Try frame format first (has magic number 0x184D2204)
+  if (compressed.length >= 4 && compressed.readUInt32LE(0) === 0x184D2204) {
+    return lz4.decode(compressed);
+  }
+
+  // For block format, we need to know the uncompressed size
+  // Hyperliquid typically uses a size prefix or we estimate
+  // Try decoding with a large output buffer
+  const maxOutputSize = compressed.length * 10; // Estimate 10x compression ratio
+  const output = Buffer.alloc(maxOutputSize);
+
+  try {
+    const decodedSize = lz4.decodeBlock(compressed, output);
+    return output.slice(0, decodedSize);
+  } catch {
+    // If block decode fails, try frame decode
+    return lz4.decode(compressed);
+  }
+}
 
 // S3 bucket URLs (public, no auth required)
 const S3_BUCKETS = {
@@ -154,10 +180,15 @@ export class S3Fetcher {
 
           let data: string;
           if (file.endsWith('.lz4')) {
-            // LZ4 decompression would require lz4 package
-            // For now, skip LZ4 files or use gunzip if gzipped
-            logger.debug('S3Fetcher', `Skipping LZ4 file: ${file}`);
-            continue;
+            try {
+              const decompressed = decompressLz4(Buffer.from(response.data));
+              data = decompressed.toString('utf-8');
+            } catch (lz4Error) {
+              logger.warn('S3Fetcher', `Failed to decompress LZ4 file: ${file}`, {
+                error: lz4Error instanceof Error ? lz4Error.message : 'Unknown',
+              });
+              continue;
+            }
           } else if (file.endsWith('.gz')) {
             const decompressed = await gunzip(response.data);
             data = decompressed.toString('utf-8');
@@ -207,7 +238,6 @@ export class S3Fetcher {
     try {
       const fileUrl = `${S3_BUCKETS.archive}/asset_ctxs/${date}.csv.lz4`;
 
-      // Try to fetch (might not exist or might need different format)
       const response = await axios.get(fileUrl, {
         responseType: 'arraybuffer',
         validateStatus: (status) => status < 500,
@@ -218,10 +248,32 @@ export class S3Fetcher {
         return contexts;
       }
 
-      // Would need LZ4 decompression here
-      logger.debug('S3Fetcher', `Asset contexts file found for ${date}, LZ4 decompression needed`);
+      // Decompress LZ4
+      const decompressed = decompressLz4(Buffer.from(response.data));
+      const csvData = decompressed.toString('utf-8');
+
+      // Parse CSV (skip header row)
+      const lines = csvData.trim().split('\n');
+      for (let i = 1; i < lines.length; i++) {
+        const parts = lines[i].split(',');
+        if (parts.length >= 7) {
+          contexts.push({
+            coin: parts[0],
+            dayNtlVlm: parts[1],
+            funding: parts[2],
+            markPx: parts[3],
+            oraclePx: parts[4],
+            openInterest: parts[5],
+            prevDayPx: parts[6],
+          });
+        }
+      }
+
+      logger.debug('S3Fetcher', `Loaded ${contexts.length} asset contexts for ${date}`);
     } catch (error) {
-      logger.debug('S3Fetcher', `Failed to fetch asset contexts for ${date}`);
+      logger.debug('S3Fetcher', `Failed to fetch asset contexts for ${date}`, {
+        error: error instanceof Error ? error.message : 'Unknown',
+      });
     }
 
     return contexts;

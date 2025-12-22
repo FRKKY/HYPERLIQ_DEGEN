@@ -38,7 +38,7 @@ CREATE INDEX idx_backtest_results_passed ON backtest_results(strategy_name, vali
 CREATE TABLE backtest_validation_criteria (
     id SERIAL PRIMARY KEY,
     strategy_name VARCHAR(50),  -- NULL means default criteria for all strategies
-    min_data_days INTEGER NOT NULL DEFAULT 90,           -- 3 months minimum for regime coverage
+    min_data_days INTEGER NOT NULL DEFAULT 180,          -- 6 months minimum for regime coverage
     min_trades INTEGER NOT NULL DEFAULT 100,             -- Statistical significance
     min_sharpe_ratio DECIMAL(5, 2) NOT NULL DEFAULT 1.0, -- Institutional standard
     max_drawdown_pct DECIMAL(5, 2) NOT NULL DEFAULT -15.0, -- Tight risk control

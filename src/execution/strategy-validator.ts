@@ -24,7 +24,7 @@ export interface ValidationResult {
 
 // Tightened thresholds for statistical confidence and risk management
 const DEFAULT_CRITERIA: ValidationCriteria = {
-  minDataDays: 90,            // 3 months minimum for regime coverage
+  minDataDays: 180,           // 6 months minimum for regime coverage
   minTrades: 100,             // Statistical significance
   minSharpeRatio: 1.0,        // Institutional standard
   maxDrawdownPct: -15.0,      // Tight risk control
