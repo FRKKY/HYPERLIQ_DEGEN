@@ -12,6 +12,8 @@ import {
   Alert,
   SystemHealthCheck,
   StrategyName,
+  PositionStrategyName,
+  Environment,
 } from '../types';
 import { logger, healthChecker, createDatabaseHealthCheck, DatabaseError } from '../utils';
 
@@ -189,11 +191,13 @@ export class Database {
   }
 
   async getFundingRates(symbol: string, hours: number = 24): Promise<FundingRate[]> {
+    // Validate hours to prevent any edge cases (1 hour to 1 year max)
+    const validatedHours = Math.min(Math.max(Math.floor(hours), 1), 8760);
     const result = await this.pool.query<FundingRate>(
       `SELECT symbol, funding_time as "fundingTime", funding_rate as "fundingRate", mark_price as "markPrice"
-       FROM funding_rates WHERE symbol = $1 AND funding_time > NOW() - INTERVAL '${hours} hours'
+       FROM funding_rates WHERE symbol = $1 AND funding_time > NOW() - (INTERVAL '1 hour' * $2)
        ORDER BY funding_time DESC`,
-      [symbol]
+      [symbol, validatedHours]
     );
     return result.rows.map((r) => ({
       ...r,
@@ -235,11 +239,13 @@ export class Database {
   }
 
   async getOpenInterestHistory(symbol: string, hours: number = 24): Promise<{ recordedAt: Date; openInterest: number }[]> {
+    // Validate hours to prevent any edge cases (1 hour to 1 year max)
+    const validatedHours = Math.min(Math.max(Math.floor(hours), 1), 8760);
     const result = await this.pool.query(
       `SELECT recorded_at as "recordedAt", open_interest as "openInterest"
-       FROM open_interest WHERE symbol = $1 AND recorded_at > NOW() - INTERVAL '${hours} hours'
+       FROM open_interest WHERE symbol = $1 AND recorded_at > NOW() - (INTERVAL '1 hour' * $2)
        ORDER BY recorded_at DESC`,
-      [symbol]
+      [symbol, validatedHours]
     );
     return result.rows.map((r) => ({
       recordedAt: r.recordedAt,
@@ -249,11 +255,11 @@ export class Database {
 
   // ===== SIGNALS =====
 
-  async insertSignal(signal: Signal): Promise<void> {
+  async insertSignal(signal: Signal, environment: Environment = 'mainnet', strategyVersionId?: number): Promise<void> {
     await this.pool.query(
-      `INSERT INTO signals (strategy_name, symbol, signal_time, direction, strength, entry_price, stop_loss, take_profit, metadata)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
-      [signal.strategyName, signal.symbol, signal.signalTime, signal.direction, signal.strength, signal.entryPrice, signal.stopLoss, signal.takeProfit, signal.metadata]
+      `INSERT INTO signals (strategy_name, symbol, signal_time, direction, strength, entry_price, stop_loss, take_profit, metadata, environment, strategy_version_id)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
+      [signal.strategyName, signal.symbol, signal.signalTime, signal.direction, signal.strength, signal.entryPrice, signal.stopLoss, signal.takeProfit, signal.metadata, environment, strategyVersionId]
     );
   }
 
@@ -278,11 +284,11 @@ export class Database {
 
   // ===== TRADES =====
 
-  async insertTrade(trade: Trade): Promise<void> {
+  async insertTrade(trade: Trade, environment: Environment = 'mainnet', strategyVersionId?: number): Promise<void> {
     await this.pool.query(
-      `INSERT INTO trades (trade_id, strategy_name, symbol, side, direction, quantity, price, fee, leverage, executed_at, order_type, pnl, metadata)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)`,
-      [trade.tradeId, trade.strategyName, trade.symbol, trade.side, trade.direction, trade.quantity, trade.price, trade.fee, trade.leverage, trade.executedAt, trade.orderType, trade.pnl, trade.metadata]
+      `INSERT INTO trades (trade_id, strategy_name, symbol, side, direction, quantity, price, fee, leverage, executed_at, order_type, pnl, metadata, environment, strategy_version_id)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)`,
+      [trade.tradeId, trade.strategyName, trade.symbol, trade.side, trade.direction, trade.quantity, trade.price, trade.fee, trade.leverage, trade.executedAt, trade.orderType, trade.pnl, trade.metadata, environment, strategyVersionId]
     );
   }
 
@@ -308,14 +314,42 @@ export class Database {
     const client = await this.pool.connect();
     try {
       await client.query('BEGIN');
-      await client.query('DELETE FROM positions');
+
+      // Get current symbols to track what needs to be deleted
+      const currentSymbols = positions.map(p => p.symbol);
+
+      // Delete positions that no longer exist (if any positions provided)
+      if (currentSymbols.length > 0) {
+        // Build parameterized query for deletion
+        const placeholders = currentSymbols.map((_, i) => `$${i + 1}`).join(',');
+        await client.query(
+          `DELETE FROM positions WHERE symbol NOT IN (${placeholders})`,
+          currentSymbols
+        );
+      } else {
+        // If no positions, delete all
+        await client.query('DELETE FROM positions');
+      }
+
+      // Upsert each position (INSERT or UPDATE on conflict)
       for (const pos of positions) {
         await client.query(
-          `INSERT INTO positions (symbol, side, size, entry_price, leverage, liquidation_price, unrealized_pnl, margin_used, strategy_name, opened_at)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
+          `INSERT INTO positions (symbol, side, size, entry_price, leverage, liquidation_price, unrealized_pnl, margin_used, strategy_name, opened_at, updated_at)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NOW())
+           ON CONFLICT (symbol) DO UPDATE SET
+             side = EXCLUDED.side,
+             size = EXCLUDED.size,
+             entry_price = EXCLUDED.entry_price,
+             leverage = EXCLUDED.leverage,
+             liquidation_price = EXCLUDED.liquidation_price,
+             unrealized_pnl = EXCLUDED.unrealized_pnl,
+             margin_used = EXCLUDED.margin_used,
+             strategy_name = EXCLUDED.strategy_name,
+             updated_at = NOW()`,
           [pos.symbol, pos.side, pos.size, pos.entryPrice, pos.leverage, pos.liquidationPrice, pos.unrealizedPnl, pos.marginUsed, pos.strategyName, pos.openedAt]
         );
       }
+
       await client.query('COMMIT');
     } catch (error) {
       await client.query('ROLLBACK');
@@ -360,10 +394,13 @@ export class Database {
   }
 
   async getEquityHistory(hours: number = 168): Promise<{ snapshotTime: Date; equity: number }[]> {
+    // Validate hours to prevent any edge cases (1 hour to 1 year max)
+    const validatedHours = Math.min(Math.max(Math.floor(hours), 1), 8760);
     const result = await this.pool.query(
       `SELECT snapshot_time as "snapshotTime", equity FROM account_snapshots
-       WHERE snapshot_time > NOW() - INTERVAL '${hours} hours'
-       ORDER BY snapshot_time ASC`
+       WHERE snapshot_time > NOW() - (INTERVAL '1 hour' * $1)
+       ORDER BY snapshot_time ASC`,
+      [validatedHours]
     );
     return result.rows.map((r) => ({
       snapshotTime: r.snapshotTime,
@@ -374,14 +411,17 @@ export class Database {
   // ===== STRATEGY PERFORMANCE =====
 
   async getStrategyPerformances(periodHours: number = 24): Promise<StrategyPerformance[]> {
+    // Validate hours to prevent any edge cases (1 hour to 1 year max)
+    const validatedHours = Math.min(Math.max(Math.floor(periodHours), 1), 8760);
     const result = await this.pool.query<StrategyPerformance>(
       `SELECT strategy_name as "strategyName", period_start as "periodStart", period_end as "periodEnd",
               total_trades as "totalTrades", winning_trades as "winningTrades", losing_trades as "losingTrades",
               total_pnl as "totalPnl", max_drawdown as "maxDrawdown", sharpe_ratio as "sharpeRatio",
               profit_factor as "profitFactor", avg_win as "avgWin", avg_loss as "avgLoss", consecutive_losses as "consecutiveLosses"
        FROM strategy_performance
-       WHERE period_end > NOW() - INTERVAL '${periodHours} hours'
-       ORDER BY period_end DESC`
+       WHERE period_end > NOW() - (INTERVAL '1 hour' * $1)
+       ORDER BY period_end DESC`,
+      [validatedHours]
     );
     return result.rows.map((r) => ({
       ...r,
@@ -546,5 +586,269 @@ export class Database {
        ON CONFLICT (symbol, timeframe, computed_at, indicator_name, parameters) DO UPDATE SET indicator_value = EXCLUDED.indicator_value`,
       [symbol, timeframe, indicatorName, value, params || {}]
     );
+  }
+
+  // ===== MARKET DATA (from migration 003) =====
+
+  async insertMarketTrade(
+    symbol: string,
+    side: 'BUY' | 'SELL',
+    price: number,
+    size: number,
+    tradeTime: Date,
+    txHash?: string
+  ): Promise<void> {
+    await this.pool.query(
+      `INSERT INTO market_trades (symbol, side, price, size, trade_time, tx_hash)
+       VALUES ($1, $2, $3, $4, $5, $6)
+       ON CONFLICT (symbol, trade_time, tx_hash) DO NOTHING`,
+      [symbol, side, price, size, tradeTime, txHash]
+    );
+  }
+
+  async insertMarketTradesBatch(trades: Array<{
+    symbol: string;
+    side: 'BUY' | 'SELL';
+    price: number;
+    size: number;
+    tradeTime: Date;
+    txHash?: string;
+  }>): Promise<void> {
+    if (trades.length === 0) return;
+
+    const client = await this.pool.connect();
+    try {
+      await client.query('BEGIN');
+      for (const trade of trades) {
+        await client.query(
+          `INSERT INTO market_trades (symbol, side, price, size, trade_time, tx_hash)
+           VALUES ($1, $2, $3, $4, $5, $6)
+           ON CONFLICT (symbol, trade_time, tx_hash) DO NOTHING`,
+          [trade.symbol, trade.side, trade.price, trade.size, trade.tradeTime, trade.txHash]
+        );
+      }
+      await client.query('COMMIT');
+    } catch (error) {
+      await client.query('ROLLBACK');
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
+  async getMarketTrades(symbol: string, hours: number = 24): Promise<Array<{
+    symbol: string;
+    side: 'BUY' | 'SELL';
+    price: number;
+    size: number;
+    tradeTime: Date;
+  }>> {
+    const validatedHours = Math.min(Math.max(Math.floor(hours), 1), 8760);
+    const result = await this.pool.query(
+      `SELECT symbol, side, price, size, trade_time as "tradeTime"
+       FROM market_trades WHERE symbol = $1 AND trade_time > NOW() - (INTERVAL '1 hour' * $2)
+       ORDER BY trade_time DESC`,
+      [symbol, validatedHours]
+    );
+    return result.rows.map(r => ({
+      symbol: r.symbol,
+      side: r.side as 'BUY' | 'SELL',
+      price: Number(r.price),
+      size: Number(r.size),
+      tradeTime: r.tradeTime,
+    }));
+  }
+
+  async insertOrderbookSnapshot(
+    symbol: string,
+    snapshotTime: Date,
+    bids: Record<string, string>,
+    asks: Record<string, string>,
+    spread?: number
+  ): Promise<void> {
+    await this.pool.query(
+      `INSERT INTO orderbook_snapshots (symbol, snapshot_time, bids, asks, spread)
+       VALUES ($1, $2, $3, $4, $5)`,
+      [symbol, snapshotTime, JSON.stringify(bids), JSON.stringify(asks), spread]
+    );
+  }
+
+  async getOrderbookSnapshots(symbol: string, hours: number = 24): Promise<Array<{
+    symbol: string;
+    snapshotTime: Date;
+    bids: Record<string, string>;
+    asks: Record<string, string>;
+    spread?: number;
+  }>> {
+    const validatedHours = Math.min(Math.max(Math.floor(hours), 1), 8760);
+    const result = await this.pool.query(
+      `SELECT symbol, snapshot_time as "snapshotTime", bids, asks, spread
+       FROM orderbook_snapshots WHERE symbol = $1 AND snapshot_time > NOW() - (INTERVAL '1 hour' * $2)
+       ORDER BY snapshot_time DESC`,
+      [symbol, validatedHours]
+    );
+    return result.rows.map(r => ({
+      symbol: r.symbol,
+      snapshotTime: r.snapshotTime,
+      bids: r.bids,
+      asks: r.asks,
+      spread: r.spread ? Number(r.spread) : undefined,
+    }));
+  }
+
+  async insertLiquidation(
+    symbol: string,
+    side: 'LONG' | 'SHORT',
+    size: number,
+    price: number,
+    liquidationTime: Date,
+    userAddress?: string
+  ): Promise<void> {
+    await this.pool.query(
+      `INSERT INTO liquidations (symbol, side, size, price, liquidation_time, user_address)
+       VALUES ($1, $2, $3, $4, $5, $6)`,
+      [symbol, side, size, price, liquidationTime, userAddress]
+    );
+  }
+
+  async getLiquidations(symbol: string, hours: number = 24): Promise<Array<{
+    symbol: string;
+    side: 'LONG' | 'SHORT';
+    size: number;
+    price: number;
+    liquidationTime: Date;
+  }>> {
+    const validatedHours = Math.min(Math.max(Math.floor(hours), 1), 8760);
+    const result = await this.pool.query(
+      `SELECT symbol, side, size, price, liquidation_time as "liquidationTime"
+       FROM liquidations WHERE symbol = $1 AND liquidation_time > NOW() - (INTERVAL '1 hour' * $2)
+       ORDER BY liquidation_time DESC`,
+      [symbol, validatedHours]
+    );
+    return result.rows.map(r => ({
+      symbol: r.symbol,
+      side: r.side as 'LONG' | 'SHORT',
+      size: Number(r.size),
+      price: Number(r.price),
+      liquidationTime: r.liquidationTime,
+    }));
+  }
+
+  // ============================================================
+  // DATA RETENTION / CLEANUP METHODS
+  // ============================================================
+
+  // Table name to time column mapping for cleanup
+  private readonly tableTimeColumns: Record<string, string> = {
+    candles: 'created_at',
+    funding_rates: 'created_at',
+    open_interest: 'created_at',
+    market_trades: 'created_at',
+    orderbook_snapshots: 'created_at',
+    liquidations: 'created_at',
+    signals: 'created_at',
+    trades: 'created_at',
+    account_snapshots: 'created_at',
+    mcl_decisions: 'created_at',
+    system_health: 'created_at',
+    alerts: 'created_at',
+    promotion_evaluations: 'evaluated_at',
+  };
+
+  async getRetentionConfig(): Promise<Array<{
+    tableName: string;
+    retentionDays: number;
+    enabled: boolean;
+    lastCleanupAt: Date | null;
+    rowsDeletedLast: number;
+  }>> {
+    const result = await this.pool.query(
+      `SELECT table_name as "tableName", retention_days as "retentionDays",
+              enabled, last_cleanup_at as "lastCleanupAt", rows_deleted_last as "rowsDeletedLast"
+       FROM data_retention_config ORDER BY table_name`
+    );
+    return result.rows;
+  }
+
+  async updateRetentionConfig(tableName: string, retentionDays: number, enabled: boolean): Promise<void> {
+    await this.pool.query(
+      `UPDATE data_retention_config
+       SET retention_days = $2, enabled = $3, updated_at = NOW()
+       WHERE table_name = $1`,
+      [tableName, retentionDays, enabled]
+    );
+  }
+
+  async runRetentionCleanup(): Promise<{ tableName: string; rowsDeleted: number }[]> {
+    const results: { tableName: string; rowsDeleted: number }[] = [];
+
+    // Get enabled retention configs
+    const configResult = await this.pool.query(
+      `SELECT table_name, retention_days FROM data_retention_config WHERE enabled = TRUE`
+    );
+
+    for (const config of configResult.rows) {
+      const tableName = config.table_name;
+      const retentionDays = config.retention_days;
+      const timeColumn = this.tableTimeColumns[tableName];
+
+      if (!timeColumn) {
+        console.warn(`[Database] No time column mapping for table: ${tableName}`);
+        continue;
+      }
+
+      try {
+        // Delete old records in batches to avoid long locks
+        const deleteResult = await this.pool.query(
+          `WITH deleted AS (
+             DELETE FROM ${tableName}
+             WHERE ${timeColumn} < NOW() - (INTERVAL '1 day' * $1)
+             RETURNING 1
+           )
+           SELECT COUNT(*) as count FROM deleted`,
+          [retentionDays]
+        );
+
+        const rowsDeleted = parseInt(deleteResult.rows[0].count, 10);
+        results.push({ tableName, rowsDeleted });
+
+        // Update retention config with cleanup stats
+        await this.pool.query(
+          `UPDATE data_retention_config
+           SET last_cleanup_at = NOW(), rows_deleted_last = $2
+           WHERE table_name = $1`,
+          [tableName, rowsDeleted]
+        );
+
+        if (rowsDeleted > 0) {
+          console.log(`[Database] Retention cleanup: ${tableName} - deleted ${rowsDeleted} rows`);
+        }
+      } catch (error) {
+        console.error(`[Database] Retention cleanup failed for ${tableName}:`, error);
+      }
+    }
+
+    // Update system state
+    await this.updateSystemState('data_retention_last_run', new Date().toISOString());
+
+    return results;
+  }
+
+  async getTableSizes(): Promise<Array<{
+    tableName: string;
+    rowCount: number;
+    totalSize: string;
+    indexSize: string;
+  }>> {
+    const result = await this.pool.query(`
+      SELECT
+        relname as "tableName",
+        n_live_tup as "rowCount",
+        pg_size_pretty(pg_total_relation_size(relid)) as "totalSize",
+        pg_size_pretty(pg_indexes_size(relid)) as "indexSize"
+      FROM pg_stat_user_tables
+      ORDER BY pg_total_relation_size(relid) DESC
+    `);
+    return result.rows;
   }
 }

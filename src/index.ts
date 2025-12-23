@@ -278,6 +278,23 @@ class TradingSystem {
       }
     });
 
+    // Schedule data retention cleanup (daily at 3 AM UTC)
+    cron.schedule('0 3 * * *', async () => {
+      try {
+        const retentionEnabled = await this.db.getSystemState();
+        if (retentionEnabled.tradingEnabled) { // Use as proxy for maintenance mode
+          logger.info('System', 'Running data retention cleanup');
+          const results = await this.db.runRetentionCleanup();
+          const totalDeleted = results.reduce((sum, r) => sum + r.rowsDeleted, 0);
+          if (totalDeleted > 0) {
+            logger.info('System', `Data retention cleanup completed`, { totalDeleted, tables: results.filter(r => r.rowsDeleted > 0) });
+          }
+        }
+      } catch (error) {
+        logger.error('System', 'Error running data retention cleanup', { error: error instanceof Error ? error.message : 'Unknown' });
+      }
+    });
+
     // Schedule position sync (every 30 seconds) with mutex
     setInterval(async () => {
       if (this.positionSyncRunning) {
