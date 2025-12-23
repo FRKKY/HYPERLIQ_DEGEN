@@ -2,9 +2,9 @@
  * Optimal Historical Data Extractor
  *
  * Orchestrates the complete historical data extraction pipeline:
- * 1. Phase 1: S3 bulk download for unlimited historical trades
- * 2. Phase 2: API parallel fetch to fill recent gaps
- * 3. Phase 3: Handoff to real-time WebSocket updates
+ * 1. Phase 1: API parallel fetch with pagination (unlimited historical data)
+ * 2. Phase 2: User account data (fills, orders)
+ * 3. Phase 3: Open interest snapshot
  *
  * Features:
  * - Priority-based symbol ordering (high-volume first)
@@ -16,8 +16,7 @@
 
 import { HyperliquidRestClient } from '../hyperliquid';
 import { Database } from './database';
-import { ParallelFetcher, } from './parallel-fetcher';
-import { S3Fetcher } from './s3-fetcher';
+import { ParallelFetcher } from './parallel-fetcher';
 import { Timeframe } from '../types';
 import { logger } from '../utils';
 
@@ -34,17 +33,12 @@ export interface ExtractionConfig {
   fundingHistoryMonths: number;
   incrementalMode: boolean;
 
-  // S3 fetch configuration
-  useS3: boolean;
-  s3StartDate?: Date;
-  s3EndDate?: Date;
-
   // Progress callback
   onProgress?: (progress: ExtractionProgress) => void;
 }
 
 export interface ExtractionProgress {
-  phase: 'initializing' | 's3_fetch' | 'api_fetch' | 'complete' | 'error';
+  phase: 'initializing' | 'api_fetch' | 'user_data' | 'open_interest' | 'complete' | 'error';
   overallProgress: number;  // 0-100
   currentPhase: {
     name: string;
@@ -77,7 +71,6 @@ const DEFAULT_CONFIG: ExtractionConfig = {
   apiConcurrency: 5,
   fundingHistoryMonths: 12,
   incrementalMode: true,
-  useS3: true,  // S3 enabled by default for deep historical data
 };
 
 export class OptimalExtractor {
@@ -85,7 +78,6 @@ export class OptimalExtractor {
   private db: Database;
   private config: ExtractionConfig;
   private parallelFetcher: ParallelFetcher;
-  private s3Fetcher: S3Fetcher;
   private progress: ExtractionProgress;
   private isRunning = false;
   private abortRequested = false;
@@ -108,7 +100,6 @@ export class OptimalExtractor {
       onProgress: (p) => this.updateApiProgress(p),
     });
 
-    this.s3Fetcher = new S3Fetcher(db);
     this.progress = this.initProgress();
   }
 
@@ -153,7 +144,6 @@ export class OptimalExtractor {
     this.progress.timing.startTime = new Date();
 
     logger.info('OptimalExtractor', 'Starting optimal data extraction', {
-      useS3: this.config.useS3,
       apiConcurrency: this.config.apiConcurrency,
       incrementalMode: this.config.incrementalMode,
       timeframes: this.config.timeframes,
@@ -172,22 +162,17 @@ export class OptimalExtractor {
 
       logger.info('OptimalExtractor', `Found ${targetSymbols.length} symbols to process`);
 
-      // Phase 1: S3 bulk download (if enabled)
-      if (this.config.useS3 && !this.abortRequested) {
-        await this.runS3Phase(targetSymbols);
-      }
-
-      // Phase 2: API parallel fetch
+      // Phase 1: API parallel fetch (candles + funding)
       if (!this.abortRequested) {
         await this.runApiPhase(targetSymbols);
       }
 
-      // Phase 3: Fetch user account data (fills, orders)
+      // Phase 2: Fetch user account data (fills, orders)
       if (!this.abortRequested) {
         await this.fetchUserData();
       }
 
-      // Phase 4: Capture current open interest
+      // Phase 3: Capture current open interest
       if (!this.abortRequested) {
         await this.captureOpenInterest(targetSymbols);
       }
@@ -216,54 +201,7 @@ export class OptimalExtractor {
   }
 
   /**
-   * Phase 1: S3 bulk data download
-   */
-  private async runS3Phase(symbols: string[]): Promise<void> {
-    this.progress.phase = 's3_fetch';
-    this.progress.currentPhase = {
-      name: 'S3 Bulk Download',
-      progress: 0,
-      details: 'Checking S3 bucket availability...',
-    };
-
-    logger.info('OptimalExtractor', 'Starting S3 bulk download phase');
-
-    // Check S3 availability
-    const availability = await this.s3Fetcher.checkAvailability();
-
-    if (!availability.nodeDataAvailable) {
-      logger.warn('OptimalExtractor', 'S3 node data bucket not accessible, skipping S3 phase');
-      return;
-    }
-
-    logger.info('OptimalExtractor', 'S3 buckets available', {
-      latestDate: availability.latestDate,
-      totalDates: availability.totalDates,
-    });
-
-    // Determine date range
-    const endDate = this.config.s3EndDate || new Date();
-    const startDate = this.config.s3StartDate || new Date(endDate.getTime() - 30 * 24 * 60 * 60 * 1000);
-
-    this.progress.currentPhase.details = `Fetching data from ${startDate.toISOString().slice(0, 10)} to ${endDate.toISOString().slice(0, 10)}`;
-
-    // Run S3 fetch
-    const s3Result = await this.s3Fetcher.fetchHistoricalData(startDate, endDate, symbols);
-
-    this.progress.stats.candlesCollected += s3Result.totalRecords;
-
-    if (s3Result.errors.length > 0) {
-      this.progress.stats.errors += s3Result.errors.length;
-    }
-
-    logger.info('OptimalExtractor', 'S3 phase complete', {
-      records: s3Result.totalRecords,
-      errors: s3Result.errors.length,
-    });
-  }
-
-  /**
-   * Phase 2: API parallel fetch
+   * Phase 1: API parallel fetch
    */
   private async runApiPhase(symbols: string[]): Promise<void> {
     this.progress.phase = 'api_fetch';
@@ -301,9 +239,10 @@ export class OptimalExtractor {
   }
 
   /**
-   * Fetch user account data (fills, orders)
+   * Phase 2: Fetch user account data (fills, orders)
    */
   private async fetchUserData(): Promise<void> {
+    this.progress.phase = 'user_data';
     this.progress.currentPhase = {
       name: 'User Data',
       progress: 0,
@@ -408,9 +347,10 @@ export class OptimalExtractor {
   }
 
   /**
-   * Capture current open interest snapshot
+   * Phase 3: Capture current open interest snapshot
    */
   private async captureOpenInterest(symbols: string[]): Promise<void> {
+    this.progress.phase = 'open_interest';
     this.progress.currentPhase = {
       name: 'Open Interest Snapshot',
       progress: 0,
@@ -458,13 +398,8 @@ export class OptimalExtractor {
       `${fetcherProgress.completedTasks}/${fetcherProgress.totalTasks} tasks | ` +
       `${fetcherProgress.totalRecords.toLocaleString()} records`;
 
-    // Update overall progress (S3 = 30%, API = 60%, OI = 10%)
-    const s3Weight = this.config.useS3 ? 0.3 : 0;
-    const apiWeight = this.config.useS3 ? 0.6 : 0.9;
-    const s3Progress = this.progress.phase === 's3_fetch' ? this.progress.currentPhase.progress : 100;
-
-    this.progress.overallProgress =
-      s3Weight * s3Progress + apiWeight * progress;
+    // Update overall progress (API = 80%, User Data = 15%, OI = 5%)
+    this.progress.overallProgress = 0.8 * progress;
 
     this.progress.timing.elapsedSeconds =
       (Date.now() - this.progress.timing.startTime.getTime()) / 1000;
@@ -678,4 +613,3 @@ export interface DataCoverageReport {
 
 // Export sub-modules
 export { ParallelFetcher } from './parallel-fetcher';
-export { S3Fetcher } from './s3-fetcher';

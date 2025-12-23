@@ -11,8 +11,6 @@
  *   --concurrency=5         Number of parallel workers (default: 5)
  *   --funding-months=12     Months of funding history (default: 12)
  *   --no-incremental        Fetch all data, ignore existing
- *   --use-s3                Enable S3 bulk download (requires LZ4)
- *   --s3-days=30            Days of S3 data to fetch (default: 30)
  *   --coverage              Show data coverage report and exit
  *   --dry-run               Show what would be fetched without fetching
  *   --help                  Show this help message
@@ -36,8 +34,6 @@ function parseArgs(): {
   concurrency: number;
   fundingMonths: number;
   incremental: boolean;
-  useS3: boolean;
-  s3Days: number;
   coverage: boolean;
   dryRun: boolean;
   help: boolean;
@@ -49,8 +45,6 @@ function parseArgs(): {
     concurrency: 5,
     fundingMonths: 12,
     incremental: true,
-    useS3: false,
-    s3Days: 30,
     coverage: false,
     dryRun: false,
     help: false,
@@ -65,8 +59,6 @@ function parseArgs(): {
       result.dryRun = true;
     } else if (arg === '--no-incremental') {
       result.incremental = false;
-    } else if (arg === '--use-s3') {
-      result.useS3 = true;
     } else if (arg.startsWith('--symbols=')) {
       result.symbols = arg.split('=')[1].split(',').map((s) => s.trim().toUpperCase());
     } else if (arg.startsWith('--timeframes=')) {
@@ -75,8 +67,6 @@ function parseArgs(): {
       result.concurrency = parseInt(arg.split('=')[1], 10);
     } else if (arg.startsWith('--funding-months=')) {
       result.fundingMonths = parseInt(arg.split('=')[1], 10);
-    } else if (arg.startsWith('--s3-days=')) {
-      result.s3Days = parseInt(arg.split('=')[1], 10);
     }
   }
 
@@ -88,7 +78,7 @@ function showHelp(): void {
 Optimal Historical Data Extraction CLI
 ======================================
 
-Extracts historical data from Hyperliquid with intelligent rate limiting,
+Extracts historical data from Hyperliquid API with intelligent rate limiting,
 parallel fetching, and priority-based symbol ordering.
 
 Usage:
@@ -100,8 +90,6 @@ Options:
   --concurrency=5         Number of parallel API workers (default: 5)
   --funding-months=12     Months of funding history to fetch (default: 12)
   --no-incremental        Fetch all data, ignoring existing records
-  --use-s3                Enable S3 bulk download for deep history
-  --s3-days=30            Days of S3 data to fetch (default: 30)
   --coverage              Show current data coverage and exit
   --dry-run               Show extraction plan without executing
   --help                  Show this help message
@@ -125,7 +113,7 @@ Examples:
   npx ts-node scripts/run-optimal-extraction.ts --coverage
 
 Data Limits (Hyperliquid API):
-  - Candles: 5,000 most recent per symbol/timeframe
+  - Candles: Unlimited (paginated, 5000 per request)
   - Funding: Unlimited (paginated)
   - Rate limit: 1,200 weight/minute
 
@@ -324,13 +312,7 @@ async function main(): Promise<void> {
       apiConcurrency: args.concurrency,
       fundingHistoryMonths: args.fundingMonths,
       incrementalMode: args.incremental,
-      useS3: args.useS3,
     };
-
-    if (args.useS3) {
-      config.s3EndDate = new Date();
-      config.s3StartDate = new Date(Date.now() - args.s3Days * 24 * 60 * 60 * 1000);
-    }
 
     // Dry run - just show plan (no database needed)
     if (args.dryRun) {
