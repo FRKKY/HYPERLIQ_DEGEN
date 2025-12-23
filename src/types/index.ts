@@ -34,6 +34,9 @@ export interface Signal {
 
 export type StrategyName = 'funding_signal' | 'momentum_breakout' | 'mean_reversion' | 'trend_follow';
 
+// Extended type for position tracking that includes 'unknown' for positions opened outside our strategies
+export type PositionStrategyName = StrategyName | 'unknown';
+
 // Strategy Lifecycle Types
 export type StrategyDeploymentState =
   | 'development'        // Being developed, not running anywhere
@@ -125,7 +128,7 @@ export interface Position {
   liquidationPrice?: number;
   unrealizedPnl: number;
   marginUsed: number;
-  strategyName: StrategyName;
+  strategyName: PositionStrategyName;
   openedAt: Date;
   stopLoss?: number;
   takeProfit?: number;
@@ -224,7 +227,7 @@ export interface TelegramCommand {
 // Trade types
 export interface Trade {
   tradeId?: string;
-  strategyName: StrategyName;
+  strategyName: PositionStrategyName;
   symbol: string;
   side: 'BUY' | 'SELL';
   direction: 'OPEN_LONG' | 'OPEN_SHORT' | 'CLOSE_LONG' | 'CLOSE_SHORT';

@@ -105,12 +105,25 @@ export class ConflictArbitrator {
 
       // Return normalized proposed allocations on error
       const sum = Object.values(proposedAllocations).reduce((a, b) => a + b, 0);
-      const normalizedAllocations = {
-        funding_signal: (proposedAllocations.funding_signal / sum) * 100,
-        momentum_breakout: (proposedAllocations.momentum_breakout / sum) * 100,
-        mean_reversion: (proposedAllocations.mean_reversion / sum) * 100,
-        trend_follow: (proposedAllocations.trend_follow / sum) * 100,
-      };
+
+      // Guard against division by zero - use equal distribution if sum is 0
+      let normalizedAllocations: StrategyAllocation;
+      if (sum <= 0) {
+        console.warn('[ConflictArbitrator] All allocations are 0, using equal distribution');
+        normalizedAllocations = {
+          funding_signal: 25,
+          momentum_breakout: 25,
+          mean_reversion: 25,
+          trend_follow: 25,
+        };
+      } else {
+        normalizedAllocations = {
+          funding_signal: (proposedAllocations.funding_signal / sum) * 100,
+          momentum_breakout: (proposedAllocations.momentum_breakout / sum) * 100,
+          mean_reversion: (proposedAllocations.mean_reversion / sum) * 100,
+          trend_follow: (proposedAllocations.trend_follow / sum) * 100,
+        };
+      }
 
       return {
         resolved_allocations: normalizedAllocations,
@@ -154,19 +167,32 @@ export class ConflictArbitrator {
   }
 
   private validateOutput(output: ConflictArbitratorOutput): void {
-    const strategies: StrategyName[] = ['funding_signal', 'momentum_breakout', 'mean_reversion', 'trend_follow'];
+    const strategies: (keyof StrategyAllocation)[] = ['funding_signal', 'momentum_breakout', 'mean_reversion', 'trend_follow'];
 
     for (const strategy of strategies) {
       const allocation = output.resolved_allocations[strategy];
-      if (allocation === undefined || allocation < 0) {
+      if (allocation === undefined || allocation < 0 || isNaN(allocation)) {
         throw new Error(`Invalid allocation for ${strategy}: ${allocation}`);
       }
     }
 
     // Check allocation sum
     const sum = Object.values(output.resolved_allocations).reduce((a, b) => a + b, 0);
-    if (Math.abs(sum - 100) > 5) {
-      console.warn(`[ConflictArbitrator] Allocation sum ${sum}% differs from 100%`);
+    if (sum === 0) {
+      console.warn('[ConflictArbitrator] All allocations are 0 - normalizing to equal distribution');
+      // Fix the allocations to equal distribution
+      output.resolved_allocations = {
+        funding_signal: 25,
+        momentum_breakout: 25,
+        mean_reversion: 25,
+        trend_follow: 25,
+      };
+    } else if (Math.abs(sum - 100) > 5) {
+      console.warn(`[ConflictArbitrator] Allocation sum ${sum}% differs from 100% - normalizing`);
+      // Normalize to 100%
+      for (const strategy of strategies) {
+        output.resolved_allocations[strategy] = (output.resolved_allocations[strategy] / sum) * 100;
+      }
     }
 
     if (output.leverage_cap <= 0 || output.leverage_cap > 20) {

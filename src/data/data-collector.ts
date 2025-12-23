@@ -10,6 +10,10 @@ export class DataCollector extends EventEmitter {
   private symbols: string[] = [];
   private isRunning = false;
   private candleIntervals: Map<string, NodeJS.Timeout> = new Map();
+  // Track consecutive failures per operation for circuit breaker
+  private consecutiveFailures: Map<string, number> = new Map();
+  private readonly MAX_CONSECUTIVE_FAILURES = 10;
+  private readonly FAILURE_RESET_INTERVAL = 5 * 60 * 1000; // 5 minutes
 
   constructor(restClient: HyperliquidRestClient, wsClient: HyperliquidWebSocket, db: Database) {
     super();
@@ -127,11 +131,26 @@ export class DataCollector extends EventEmitter {
       // Stagger initial candle fetches to avoid rate limits
       setTimeout(() => {
         console.log(`[DataCollector] Starting ${tf} candle collection...`);
-        this.fetchAllCandles(tf).catch(console.error);
+        this.fetchAllCandles(tf)
+          .then(() => this.recordSuccess(`candles_${tf}`))
+          .catch((error) => {
+            console.error(`[DataCollector] Error fetching ${tf} candles:`, error);
+            this.recordFailure(`candles_${tf}`);
+          });
 
         // Set up periodic fetching
         const interval = setInterval(() => {
-          this.fetchAllCandles(tf).catch(console.error);
+          // Skip if circuit breaker is open
+          if (this.isCircuitOpen(`candles_${tf}`)) {
+            console.warn(`[DataCollector] Skipping ${tf} candle fetch - circuit breaker open`);
+            return;
+          }
+          this.fetchAllCandles(tf)
+            .then(() => this.recordSuccess(`candles_${tf}`))
+            .catch((error) => {
+              console.error(`[DataCollector] Error fetching ${tf} candles:`, error);
+              this.recordFailure(`candles_${tf}`);
+            });
         }, intervalMs);
 
         this.candleIntervals.set(tf, interval);
@@ -201,12 +220,26 @@ export class DataCollector extends EventEmitter {
     // Delay initial funding fetch to let candles start first
     setTimeout(() => {
       console.log('[DataCollector] Starting funding rate collection...');
-      fetchFunding().catch(console.error);
+      fetchFunding()
+        .then(() => this.recordSuccess('funding'))
+        .catch((error) => {
+          console.error('[DataCollector] Error fetching funding rates:', error);
+          this.recordFailure('funding');
+        });
     }, 30000); // Start after 30 seconds
 
     // Fetch every hour
     const interval = setInterval(() => {
-      fetchFunding().catch(console.error);
+      if (this.isCircuitOpen('funding')) {
+        console.warn('[DataCollector] Skipping funding fetch - circuit breaker open');
+        return;
+      }
+      fetchFunding()
+        .then(() => this.recordSuccess('funding'))
+        .catch((error) => {
+          console.error('[DataCollector] Error fetching funding rates:', error);
+          this.recordFailure('funding');
+        });
     }, 60 * 60 * 1000);
 
     this.candleIntervals.set('funding', interval);
@@ -247,12 +280,26 @@ export class DataCollector extends EventEmitter {
     // Delay initial fetch to let other data collection start first
     setTimeout(() => {
       console.log('[DataCollector] Starting open interest collection...');
-      fetchOpenInterest().catch(console.error);
+      fetchOpenInterest()
+        .then(() => this.recordSuccess('openInterest'))
+        .catch((error) => {
+          console.error('[DataCollector] Error fetching open interest:', error);
+          this.recordFailure('openInterest');
+        });
     }, 45000); // Start after 45 seconds
 
     // Fetch every 15 minutes (OI doesn't change rapidly)
     const interval = setInterval(() => {
-      fetchOpenInterest().catch(console.error);
+      if (this.isCircuitOpen('openInterest')) {
+        console.warn('[DataCollector] Skipping OI fetch - circuit breaker open');
+        return;
+      }
+      fetchOpenInterest()
+        .then(() => this.recordSuccess('openInterest'))
+        .catch((error) => {
+          console.error('[DataCollector] Error fetching open interest:', error);
+          this.recordFailure('openInterest');
+        });
     }, 15 * 60 * 1000);
 
     this.candleIntervals.set('openInterest', interval);
@@ -303,12 +350,26 @@ export class DataCollector extends EventEmitter {
     // Delay initial fetch to let account state be established first
     setTimeout(() => {
       console.log('[DataCollector] Starting account snapshot collection...');
-      fetchAccountSnapshot().catch(console.error);
+      fetchAccountSnapshot()
+        .then(() => this.recordSuccess('accountSnapshot'))
+        .catch((error) => {
+          console.error('[DataCollector] Error fetching account snapshot:', error);
+          this.recordFailure('accountSnapshot');
+        });
     }, 60000); // Start after 1 minute
 
     // Fetch every 5 minutes
     const interval = setInterval(() => {
-      fetchAccountSnapshot().catch(console.error);
+      if (this.isCircuitOpen('accountSnapshot')) {
+        console.warn('[DataCollector] Skipping account snapshot - circuit breaker open');
+        return;
+      }
+      fetchAccountSnapshot()
+        .then(() => this.recordSuccess('accountSnapshot'))
+        .catch((error) => {
+          console.error('[DataCollector] Error fetching account snapshot:', error);
+          this.recordFailure('accountSnapshot');
+        });
     }, 5 * 60 * 1000);
 
     this.candleIntervals.set('accountSnapshot', interval);
@@ -316,5 +377,33 @@ export class DataCollector extends EventEmitter {
 
   private sleep(ms: number): Promise<void> {
     return new Promise((resolve) => setTimeout(resolve, ms));
+  }
+
+  // Track failures for circuit breaker pattern
+  private recordFailure(operation: string): boolean {
+    const count = (this.consecutiveFailures.get(operation) || 0) + 1;
+    this.consecutiveFailures.set(operation, count);
+
+    if (count >= this.MAX_CONSECUTIVE_FAILURES) {
+      console.error(`[DataCollector] Circuit breaker triggered for ${operation} after ${count} consecutive failures`);
+      this.emit('circuitBreaker', { operation, failures: count });
+
+      // Auto-reset after interval
+      setTimeout(() => {
+        console.log(`[DataCollector] Resetting circuit breaker for ${operation}`);
+        this.consecutiveFailures.set(operation, 0);
+      }, this.FAILURE_RESET_INTERVAL);
+
+      return true; // Circuit is open
+    }
+    return false;
+  }
+
+  private recordSuccess(operation: string): void {
+    this.consecutiveFailures.set(operation, 0);
+  }
+
+  private isCircuitOpen(operation: string): boolean {
+    return (this.consecutiveFailures.get(operation) || 0) >= this.MAX_CONSECUTIVE_FAILURES;
   }
 }

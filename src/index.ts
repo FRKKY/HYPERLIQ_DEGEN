@@ -33,6 +33,12 @@ class TradingSystem {
   private strategyPromoter!: StrategyPromoter;
   private environment!: Environment;
 
+  // Mutex flags to prevent overlapping operations
+  private tradingCycleRunning = false;
+  private positionSyncRunning = false;
+  private consecutiveTradingErrors = 0;
+  private readonly MAX_CONSECUTIVE_ERRORS = 5;
+
   async initialize(): Promise<void> {
     logger.info('System', 'Initializing trading system...');
 
@@ -192,37 +198,99 @@ class TradingSystem {
     const isTestnet = this.environment === 'testnet';
     await this.dataCollector.start(undefined, isTestnet);
 
-    // Schedule trading cycle (every minute)
+    // Validate report time format before scheduling
+    const reportTimeParts = config.trading.reportTimeUtc.split(':');
+    if (reportTimeParts.length !== 2) {
+      throw new Error(`Invalid REPORT_TIME_UTC format: ${config.trading.reportTimeUtc}. Expected HH:MM`);
+    }
+    const [hour, minute] = reportTimeParts;
+    const hourNum = parseInt(hour, 10);
+    const minuteNum = parseInt(minute, 10);
+    if (isNaN(hourNum) || isNaN(minuteNum) || hourNum < 0 || hourNum > 23 || minuteNum < 0 || minuteNum > 59) {
+      throw new Error(`Invalid REPORT_TIME_UTC: ${config.trading.reportTimeUtc}. Hour must be 0-23, minute 0-59`);
+    }
+
+    // Schedule trading cycle (every minute) with mutex to prevent overlap
     cron.schedule('* * * * *', async () => {
-      await this.runTradingCycle();
+      if (this.tradingCycleRunning) {
+        logger.warn('System', 'Skipping trading cycle - previous cycle still running');
+        return;
+      }
+      this.tradingCycleRunning = true;
+      try {
+        await this.runTradingCycle();
+        this.consecutiveTradingErrors = 0; // Reset on success
+      } catch (error) {
+        this.consecutiveTradingErrors++;
+        logger.error('System', 'Error in trading cycle', {
+          error: error instanceof Error ? error.message : 'Unknown',
+          consecutiveErrors: this.consecutiveTradingErrors
+        });
+        if (this.consecutiveTradingErrors >= this.MAX_CONSECUTIVE_ERRORS) {
+          logger.error('System', 'Too many consecutive trading errors, pausing trading');
+          await this.db.updateSystemState('trading_enabled', false);
+          await this.db.updateSystemState('pause_reason', 'Too many consecutive trading cycle errors');
+        }
+      } finally {
+        this.tradingCycleRunning = false;
+      }
     });
 
     // Schedule MCL evaluation (every hour at minute 0)
     cron.schedule(`0 */${config.trading.mclIntervalMinutes} * * *`, async () => {
-      await this.runMCLCycle();
+      try {
+        await this.runMCLCycle();
+      } catch (error) {
+        logger.error('System', 'Error in MCL cycle', { error: error instanceof Error ? error.message : 'Unknown' });
+      }
     });
 
     // Schedule daily report
-    const [hour, minute] = config.trading.reportTimeUtc.split(':');
     cron.schedule(`${minute} ${hour} * * *`, async () => {
-      await this.generateDailyReport();
+      try {
+        await this.generateDailyReport();
+      } catch (error) {
+        logger.error('System', 'Error generating daily report', { error: error instanceof Error ? error.message : 'Unknown' });
+      }
     });
 
     // Schedule daily metrics reset (midnight UTC)
     cron.schedule('0 0 * * *', async () => {
-      const state = await this.restClient.getAccountState();
-      const equity = parseFloat(state.marginSummary.accountValue);
-      await this.riskManager.resetDailyMetrics(equity);
+      try {
+        const state = await this.restClient.getAccountState();
+        const equity = parseFloat(state.marginSummary.accountValue);
+        if (!isNaN(equity) && equity > 0) {
+          await this.riskManager.resetDailyMetrics(equity);
+        } else {
+          logger.warn('System', 'Skipping daily metrics reset - invalid equity');
+        }
+      } catch (error) {
+        logger.error('System', 'Error resetting daily metrics', { error: error instanceof Error ? error.message : 'Unknown' });
+      }
     });
 
     // Schedule account snapshot (every 5 minutes)
     cron.schedule('*/5 * * * *', async () => {
-      await this.takeAccountSnapshot();
+      try {
+        await this.takeAccountSnapshot();
+      } catch (error) {
+        logger.error('System', 'Error taking account snapshot', { error: error instanceof Error ? error.message : 'Unknown' });
+      }
     });
 
-    // Schedule position sync (every 30 seconds)
+    // Schedule position sync (every 30 seconds) with mutex
     setInterval(async () => {
-      await this.positionTracker.syncPositions();
+      if (this.positionSyncRunning) {
+        return; // Skip if previous sync still running
+      }
+      this.positionSyncRunning = true;
+      try {
+        await this.positionTracker.syncPositions();
+      } catch (error) {
+        logger.error('System', 'Error syncing positions', { error: error instanceof Error ? error.message : 'Unknown' });
+      } finally {
+        this.positionSyncRunning = false;
+      }
     }, 30000);
 
     // Send startup notification

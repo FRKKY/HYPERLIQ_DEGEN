@@ -70,14 +70,26 @@ export class OrderManager {
       // 2. Get current price
       const mids = await this.client.getAllMids();
       const currentPrice = parseFloat(mids[signal.symbol]);
-      if (!currentPrice) {
-        return { success: false, reason: `Unable to get price for ${signal.symbol}` };
+      if (!currentPrice || isNaN(currentPrice) || currentPrice <= 0) {
+        return { success: false, reason: `Unable to get valid price for ${signal.symbol}: ${mids[signal.symbol]}` };
       }
 
       // 3. Calculate position size
-      const strategyConfig = STRATEGY_CONFIGS[signal.strategyName];
+      const strategyConfig = STRATEGY_CONFIGS[signal.strategyName] || STRATEGY_CONFIGS.funding_signal;
       const entryPrice = signal.entryPrice || currentPrice;
+
+      // Validate entry price
+      if (isNaN(entryPrice) || entryPrice <= 0) {
+        return { success: false, reason: `Invalid entry price: ${entryPrice}` };
+      }
+
       const stopLoss = signal.stopLoss || entryPrice * (signal.direction === 'LONG' ? 0.95 : 1.05);
+
+      // Validate stop loss is not too close to entry price (min 0.1% distance)
+      const minSlDistance = entryPrice * 0.001;
+      if (Math.abs(entryPrice - stopLoss) < minSlDistance) {
+        return { success: false, reason: `Stop loss too close to entry price (min ${(minSlDistance).toFixed(4)} distance required)` };
+      }
 
       const positionSize = this.riskManager.calculatePositionSize(
         allocation,
@@ -126,7 +138,14 @@ export class OrderManager {
       console.log(`[OrderManager] Order response:`, JSON.stringify(result, null, 2));
 
       if (result.status === 'ok') {
-        const status = result.response?.data?.statuses?.[0];
+        // Safely access statuses array with bounds check
+        const statuses = result.response?.data?.statuses;
+        if (!statuses || !Array.isArray(statuses) || statuses.length === 0) {
+          console.error(`[OrderManager] No statuses in order response:`, JSON.stringify(result));
+          return { success: false, reason: 'No order status returned from exchange' };
+        }
+
+        const status = statuses[0];
         const orderId = status?.resting?.oid || status?.filled?.oid;
 
         // Check for error in status
@@ -134,6 +153,8 @@ export class OrderManager {
           console.error(`[OrderManager] Order error from exchange:`, status.error);
           return { success: false, reason: status.error };
         }
+
+        const orderTime = new Date();
 
         // 7. Log trade with environment and version info
         await this.db.query(
@@ -149,7 +170,7 @@ export class OrderManager {
             currentPrice,
             undefined,
             positionSize.leverage,
-            new Date(),
+            orderTime,
             'MARKET',
             undefined,
             signal.metadata,
@@ -177,7 +198,9 @@ export class OrderManager {
           ]
         );
 
-        // 8. Update position tracker
+        // 8. Update position tracker AFTER order confirmed
+        // Set the open time first, then the strategy, then sync
+        this.positionTracker.setPositionOpenTime(signal.symbol, orderTime);
         this.positionTracker.setPositionStrategy(signal.symbol, signal.strategyName);
         await this.positionTracker.updatePosition(signal.symbol);
 
@@ -187,7 +210,11 @@ export class OrderManager {
 
         return { success: true, orderId: orderId?.toString() };
       } else {
-        const errorMsg = result.response?.data?.statuses?.[0]?.error || 'Unknown error';
+        // Safely access error from statuses
+        const statuses = result.response?.data?.statuses;
+        const errorMsg = (Array.isArray(statuses) && statuses.length > 0 && statuses[0]?.error)
+          ? statuses[0].error
+          : 'Unknown error';
         console.error(`[OrderManager] Order failed:`, errorMsg);
         return { success: false, reason: errorMsg };
       }

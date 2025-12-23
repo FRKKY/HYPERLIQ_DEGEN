@@ -20,7 +20,15 @@ interface StrategyState {
   shadowMode: boolean;
 }
 
+interface ExecutionStats {
+  consecutiveFailures: number;
+  lastFailureTime?: Date;
+  totalFailures: number;
+  totalSuccesses: number;
+}
+
 const MIN_24H_VOLUME = 1_000_000; // $1M minimum volume
+const MAX_CONSECUTIVE_FAILURES = 5;
 
 export class SignalAggregator {
   private strategies: Map<StrategyName, BaseStrategy> = new Map();
@@ -32,6 +40,8 @@ export class SignalAggregator {
   private disabledStrategies: Set<StrategyName> = new Set();
   private versionManager: StrategyVersionManager;
   private environment: Environment;
+  // Track execution failures per strategy for alerting
+  private executionStats: Map<StrategyName, ExecutionStats> = new Map();
 
   constructor(
     db: Database,
@@ -129,6 +139,7 @@ export class SignalAggregator {
     // Execute live signals (limited to avoid overexposure)
     const maxNewPositions = Math.max(1, Math.floor((equity / 100) * 2)); // Scale with capital
     let newPositions = 0;
+    let failedExecutions = 0;
 
     for (const aggregatedSignal of liveSignals) {
       if (newPositions >= maxNewPositions) break;
@@ -149,7 +160,28 @@ export class SignalAggregator {
 
       if (result.success) {
         newPositions++;
+        this.recordExecutionSuccess(aggregatedSignal.signal.strategyName);
+      } else {
+        failedExecutions++;
+        const shouldAlert = this.recordExecutionFailure(aggregatedSignal.signal.strategyName, result.reason || 'Unknown');
+
+        if (shouldAlert) {
+          console.error(`[SignalAggregator] ALERT: Strategy ${aggregatedSignal.signal.strategyName} has ${MAX_CONSECUTIVE_FAILURES}+ consecutive execution failures`);
+          // Log alert to database
+          await this.db.insertAlert({
+            alertTime: new Date(),
+            alertType: 'EXECUTION_FAILURES',
+            severity: 'WARNING',
+            title: 'Strategy Execution Failures',
+            message: `Strategy ${aggregatedSignal.signal.strategyName} has failed ${MAX_CONSECUTIVE_FAILURES}+ times consecutively. Last error: ${result.reason}`,
+            requiresAction: true,
+          });
+        }
       }
+    }
+
+    if (failedExecutions > 0) {
+      console.warn(`[SignalAggregator] ${failedExecutions} signal executions failed this cycle`);
     }
 
     // Check exit conditions for existing positions
@@ -272,26 +304,40 @@ export class SignalAggregator {
   }
 
   private async checkExits(): Promise<void> {
-    const positions = this.positionTracker.getAllPositions();
+    // Get a snapshot of positions to avoid modification during iteration
+    const positions = [...this.positionTracker.getAllPositions()];
+
+    // Collect positions to close, then close them after iteration
+    const positionsToClose: { symbol: string; reason: string }[] = [];
+
+    // Get prices once for all positions
+    let mids: Record<string, string>;
+    try {
+      mids = await this.client.getAllMids();
+    } catch (error) {
+      console.error('[SignalAggregator] Failed to get prices for exit checks:', error);
+      return;
+    }
 
     for (const position of positions) {
+      // Skip 'unknown' strategies - we don't know how to manage them
+      if (position.strategyName === 'unknown') continue;
+
       const strategy = this.strategies.get(position.strategyName);
       if (!strategy) continue;
 
       try {
-        // Get current price
-        const mids = await this.client.getAllMids();
         const currentPrice = parseFloat(mids[position.symbol]);
-        if (!currentPrice) continue;
+        if (!currentPrice || isNaN(currentPrice)) continue;
 
         // Check stop loss
         if (position.stopLoss !== undefined) {
           if (position.side === 'LONG' && currentPrice <= position.stopLoss) {
-            await this.orderManager.closePosition(position.symbol, 'Stop loss hit');
+            positionsToClose.push({ symbol: position.symbol, reason: 'Stop loss hit' });
             continue;
           }
           if (position.side === 'SHORT' && currentPrice >= position.stopLoss) {
-            await this.orderManager.closePosition(position.symbol, 'Stop loss hit');
+            positionsToClose.push({ symbol: position.symbol, reason: 'Stop loss hit' });
             continue;
           }
         }
@@ -299,11 +345,11 @@ export class SignalAggregator {
         // Check take profit
         if (position.takeProfit !== undefined) {
           if (position.side === 'LONG' && currentPrice >= position.takeProfit) {
-            await this.orderManager.closePosition(position.symbol, 'Take profit hit');
+            positionsToClose.push({ symbol: position.symbol, reason: 'Take profit hit' });
             continue;
           }
           if (position.side === 'SHORT' && currentPrice <= position.takeProfit) {
-            await this.orderManager.closePosition(position.symbol, 'Take profit hit');
+            positionsToClose.push({ symbol: position.symbol, reason: 'Take profit hit' });
             continue;
           }
         }
@@ -311,11 +357,56 @@ export class SignalAggregator {
         // Check strategy-specific exit conditions
         const exitCheck = await strategy.shouldExit(position, currentPrice);
         if (exitCheck.shouldExit) {
-          await this.orderManager.closePosition(position.symbol, exitCheck.reason || 'Strategy exit');
+          positionsToClose.push({ symbol: position.symbol, reason: exitCheck.reason || 'Strategy exit' });
         }
       } catch (error) {
         console.error(`[SignalAggregator] Error checking exit for ${position.symbol}:`, error);
       }
     }
+
+    // Now close positions after iteration is complete
+    for (const { symbol, reason } of positionsToClose) {
+      try {
+        await this.orderManager.closePosition(symbol, reason);
+      } catch (error) {
+        console.error(`[SignalAggregator] Error closing position ${symbol}:`, error);
+      }
+    }
+  }
+
+  // Execution stats tracking methods
+  private recordExecutionSuccess(strategyName: StrategyName): void {
+    const stats = this.getOrCreateStats(strategyName);
+    stats.consecutiveFailures = 0;
+    stats.totalSuccesses++;
+  }
+
+  private recordExecutionFailure(strategyName: StrategyName, reason: string): boolean {
+    const stats = this.getOrCreateStats(strategyName);
+    stats.consecutiveFailures++;
+    stats.lastFailureTime = new Date();
+    stats.totalFailures++;
+
+    console.warn(`[SignalAggregator] Execution failure for ${strategyName}: ${reason} (consecutive: ${stats.consecutiveFailures})`);
+
+    // Return true if we should alert (hit threshold)
+    return stats.consecutiveFailures === MAX_CONSECUTIVE_FAILURES;
+  }
+
+  private getOrCreateStats(strategyName: StrategyName): ExecutionStats {
+    let stats = this.executionStats.get(strategyName);
+    if (!stats) {
+      stats = {
+        consecutiveFailures: 0,
+        totalFailures: 0,
+        totalSuccesses: 0,
+      };
+      this.executionStats.set(strategyName, stats);
+    }
+    return stats;
+  }
+
+  getExecutionStats(): Map<StrategyName, ExecutionStats> {
+    return new Map(this.executionStats);
   }
 }

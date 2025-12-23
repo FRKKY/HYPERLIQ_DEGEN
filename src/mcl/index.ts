@@ -198,7 +198,10 @@ export class MCLOrchestrator {
     const equity = parseFloat(hlAccountState.marginSummary.accountValue);
     const totalMarginUsed = parseFloat(hlAccountState.marginSummary.totalMarginUsed);
     const unrealizedPnl = this.positionTracker.getTotalUnrealizedPnl();
-    const drawdownPct = ((equity - systemState.peakEquity) / systemState.peakEquity) * 100;
+
+    // Guard against division by zero when peakEquity is not initialized
+    const peakEquity = systemState.peakEquity > 0 ? systemState.peakEquity : equity;
+    const drawdownPct = peakEquity > 0 ? ((equity - peakEquity) / peakEquity) * 100 : 0;
 
     // Calculate realized P&L from recent trades
     const recentTrades = await this.db.getRecentTrades(50);
