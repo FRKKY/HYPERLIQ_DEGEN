@@ -779,6 +779,14 @@ export class Database {
     );
   }
 
+  // Valid table names for retention cleanup (security whitelist)
+  private readonly validRetentionTables = new Set([
+    'candles', 'funding_rates', 'open_interest', 'market_trades',
+    'orderbook_snapshots', 'liquidations', 'signals', 'trades',
+    'account_snapshots', 'mcl_decisions', 'system_health', 'alerts',
+    'promotion_evaluations',
+  ]);
+
   async runRetentionCleanup(): Promise<{ tableName: string; rowsDeleted: number }[]> {
     const results: { tableName: string; rowsDeleted: number }[] = [];
 
@@ -792,8 +800,20 @@ export class Database {
       const retentionDays = config.retention_days;
       const timeColumn = this.tableTimeColumns[tableName];
 
+      // Security: Validate table name against whitelist before interpolation
+      if (!this.validRetentionTables.has(tableName)) {
+        console.warn(`[Database] Invalid table name for retention cleanup: ${tableName}`);
+        continue;
+      }
+
       if (!timeColumn) {
         console.warn(`[Database] No time column mapping for table: ${tableName}`);
+        continue;
+      }
+
+      // Security: Validate column name is alphanumeric with underscores only
+      if (!/^[a-z_]+$/.test(timeColumn)) {
+        console.warn(`[Database] Invalid time column name: ${timeColumn}`);
         continue;
       }
 

@@ -286,7 +286,9 @@ export class OptimalExtractor {
         }
 
         if (fills.length < 2000) break;
-        startTime = Math.max(...fills.map((f) => f.time)) + 1;
+        const maxFillTime = fills.reduce((max, f) => Math.max(max, f.time), 0);
+        if (maxFillTime === 0) break;
+        startTime = maxFillTime + 1;
 
         await this.sleep(100);
       }

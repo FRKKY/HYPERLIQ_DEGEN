@@ -283,11 +283,11 @@ export class ParallelFetcher {
         this.progress.completedTasks++;
         this.progress.totalRecords += records;
 
-        // Update ETA
+        // Update ETA (guard against division by zero)
         const elapsed = (Date.now() - this.progress.startTime.getTime()) / 1000;
-        const rate = this.progress.completedTasks / elapsed;
+        const rate = elapsed > 0 ? this.progress.completedTasks / elapsed : 0;
         const remaining = this.taskQueue.length + this.activeWorkers - 1;
-        this.progress.estimatedTimeRemaining = remaining / rate;
+        this.progress.estimatedTimeRemaining = rate > 0 ? remaining / rate : 0;
 
         logger.debug('ParallelFetcher', `Worker ${workerId} completed task`, {
           task: task.id,
@@ -430,8 +430,10 @@ export class ParallelFetcher {
       // If we got less than 500, we've reached the end
       if (fundingHistory.length < 500) break;
 
-      // Move forward for pagination
-      currentStart = Math.max(...fundingHistory.map((f) => f.time)) + 1;
+      // Move forward for pagination (guard against empty array)
+      const maxTime = fundingHistory.reduce((max, f) => Math.max(max, f.time), 0);
+      if (maxTime === 0) break;
+      currentStart = maxTime + 1;
 
       await this.sleep(50);
     }

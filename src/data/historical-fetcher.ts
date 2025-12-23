@@ -224,8 +224,10 @@ export class HistoricalDataFetcher {
         // If we got less than 500, we've reached the end
         if (fundingHistory.length < 500) break;
 
-        // Move forward for pagination
-        startTime = Math.max(...fundingHistory.map(f => f.time)) + 1;
+        // Move forward for pagination (guard against empty array)
+        const maxTime = fundingHistory.reduce((max, f) => Math.max(max, f.time), 0);
+        if (maxTime === 0) break;
+        startTime = maxTime + 1;
 
         await this.sleep(50);
       } catch (error) {
@@ -273,7 +275,7 @@ export class HistoricalDataFetcher {
                 parseFloat(fill.fee || '0'),
                 new Date(fill.time),
                 'MARKET',
-                { historical: true, oid: fill.oid, closedPnl: fill.closedPnl },
+                JSON.stringify({ historical: true, oid: fill.oid, closedPnl: fill.closedPnl }),
               ]
             );
             totalFills++;
@@ -285,8 +287,10 @@ export class HistoricalDataFetcher {
         // If we got less than 2000, we've reached the end
         if (fills.length < 2000) break;
 
-        // Move start time forward
-        startTime = Math.max(...fills.map(f => f.time)) + 1;
+        // Move start time forward (guard against empty array)
+        const maxFillTime = fills.reduce((max, f) => Math.max(max, f.time), 0);
+        if (maxFillTime === 0) break;
+        startTime = maxFillTime + 1;
 
         await this.sleep(100);
       } catch (error) {
